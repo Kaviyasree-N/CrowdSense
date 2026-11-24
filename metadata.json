@@ -1,0 +1,6 @@
+{
+  "name": "CrowdSense",
+  "description": "Intelligent crowdedness-aware public bus journey planner and transport analytics platform for Delhi's bus network.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
