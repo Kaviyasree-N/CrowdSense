@@ -1,5 +1,5 @@
 import { Info, MapPin, Navigation } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ConfidenceTag, CrowdBadge } from '../components/CrowdBadge';
 import { PredictionExplainPanel } from '../components/PredictionExplainPanel';
 import { NetworkMapSegment, RouteMap } from '../components/RouteMap';
@@ -49,6 +49,18 @@ export function CrowdingMap({
   const [crowdingFilter, setCrowdingFilter] = useState<MapCrowdingCategoryFilter>('ALL');
   const [selectedSegment, setSelectedSegment] = useState<NetworkMapSegment | null>(null);
   const [selectedStop, setSelectedStop] = useState<BusStop | null>(null);
+
+  useEffect(() => {
+    const nextDate =
+      isActual && actualDataset?.dateRangeIST.start && actualDataset.dateRangeIST.start !== 'N/A'
+        ? actualDataset.dateRangeIST.start
+        : '2026-10-14';
+    setSelectedDate(nextDate);
+    setDayType(deriveDayTypeFromDate(nextDate).dayType);
+    setRouteFilter('ALL');
+    setSelectedSegment(null);
+    setSelectedStop(null);
+  }, [isActual, actualDataset?.datasetId]);
 
   const activeRoutes = useMemo(() => {
     if (!isActual) return SAMPLE_ROUTES;

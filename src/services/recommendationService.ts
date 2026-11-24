@@ -1,4 +1,4 @@
-import { JourneyOption, RecommendationCategory, SortOption } from '../types/transit';
+import type { JourneyOption, RecommendationCategory, SortOption } from '../types/transit.ts';
 
 export const recommendationService = {
   sortJourneys(journeys: JourneyOption[], sortBy: SortOption): JourneyOption[] {
@@ -25,7 +25,6 @@ export const recommendationService = {
     category: RecommendationCategory | 'all'
   ): JourneyOption[] {
     if (category === 'all') return journeys;
-    const matched = journeys.filter((j) => j.recommendation_tags.includes(category));
-    return matched.length > 0 ? matched : journeys;
+    return journeys.filter((j) => j.recommendation_tags.includes(category));
   },
 };

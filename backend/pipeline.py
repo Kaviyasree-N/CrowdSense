@@ -175,6 +175,8 @@ def process_etm_file_chunked(
                 + valid_df["end_stop_name"].str.lower()
                 + "|"
                 + valid_df["pax"].astype(str)
+                + "|"
+                + valid_df["amt"].astype(str)
             )
             keep_mask = []
             for fp in fingerprints.tolist():

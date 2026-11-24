@@ -921,6 +921,12 @@ export function DataExplorer({
           </span>
         </div>
 
+        {demoEvaluationReport.evaluationGroundTruthNote && (
+          <div className="bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2.5 text-xs text-slate-700">
+            <strong>Ground Truth Methodology Note:</strong> {demoEvaluationReport.evaluationGroundTruthNote}
+          </div>
+        )}
+
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           <div className="border border-slate-200 rounded-lg p-4 space-y-3">
             <div className="flex items-center justify-between text-xs">
@@ -960,6 +966,71 @@ export function DataExplorer({
                 )}
               </div>
             )}
+
+            {demoEvaluationReport.timePeriodBreakdown && demoEvaluationReport.timePeriodBreakdown.length > 0 && (
+              <div className="pt-2 space-y-1.5">
+                <div className="text-[11px] font-semibold text-slate-700">Holdout Error by Time Period</div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-[11px] border-collapse">
+                    <thead>
+                      <tr className="border-b border-slate-200 text-slate-500">
+                        <th className="py-1 pr-2">Period</th>
+                        <th className="py-1 px-2 text-right">N</th>
+                        <th className="py-1 px-2 text-right">Base MAE/RMSE</th>
+                        <th className="py-1 pl-2 text-right">RF MAE/RMSE</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 font-mono-tabular">
+                      {demoEvaluationReport.timePeriodBreakdown.map((row) => (
+                        <tr key={row.period}>
+                          <td className="py-1 pr-2 font-sans text-slate-700">{row.period}</td>
+                          <td className="py-1 px-2 text-right text-slate-500">{row.sampleCount}</td>
+                          <td className="py-1 px-2 text-right text-slate-900">
+                            {row.baselineMae} / {row.baselineRmse}
+                          </td>
+                          <td className="py-1 pl-2 text-right text-teal-800">
+                            {row.rfMae !== null ? `${row.rfMae} / ${row.rfRmse}` : '—'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {demoEvaluationReport.routeBreakdown && demoEvaluationReport.routeBreakdown.length > 0 && (
+              <div className="pt-2 space-y-1.5">
+                <div className="text-[11px] font-semibold text-slate-700">Holdout Error by Route</div>
+                <div className="max-h-36 overflow-y-auto overflow-x-auto">
+                  <table className="w-full text-left text-[11px] border-collapse">
+                    <thead>
+                      <tr className="border-b border-slate-200 text-slate-500">
+                        <th className="py-1 pr-2">Route</th>
+                        <th className="py-1 px-2 text-right">N</th>
+                        <th className="py-1 px-2 text-right">Base MAE/RMSE</th>
+                        <th className="py-1 pl-2 text-right">RF MAE/RMSE</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 font-mono-tabular">
+                      {demoEvaluationReport.routeBreakdown.map((row) => (
+                        <tr key={row.routeNumber}>
+                          <td className="py-1 pr-2 font-semibold text-slate-800">R{row.routeNumber}</td>
+                          <td className="py-1 px-2 text-right text-slate-500">{row.sampleCount}</td>
+                          <td className="py-1 px-2 text-right text-slate-900">
+                            {row.baselineMae} / {row.baselineRmse}
+                          </td>
+                          <td className="py-1 pl-2 text-right text-teal-800">
+                            {row.rfMae !== null ? `${row.rfMae} / ${row.rfRmse}` : '—'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
             <p className="text-xs text-slate-600">{demoEvaluationReport.reason}</p>
           </div>
 
@@ -977,7 +1048,7 @@ export function DataExplorer({
             {actualDataset ? (
               actualDataset.evaluationReport.status === 'evaluated' &&
               actualDataset.evaluationReport.baselineMetrics ? (
-                <div className="space-y-2 text-xs">
+                <div className="space-y-3 text-xs">
                   <div className="font-mono-tabular text-slate-600">
                     Train: {actualDataset.evaluationReport.trainDateRange} ({actualDataset.evaluationReport.trainCount}) · Test: {actualDataset.evaluationReport.testDateRange} ({actualDataset.evaluationReport.testCount})
                   </div>
@@ -989,6 +1060,35 @@ export function DataExplorer({
                       Random Forest MAE: {actualDataset.evaluationReport.randomForestMetrics.mae} pax · RMSE: {actualDataset.evaluationReport.randomForestMetrics.rmse} pax
                     </div>
                   )}
+                  {actualDataset.evaluationReport.timePeriodBreakdown &&
+                    actualDataset.evaluationReport.timePeriodBreakdown.length > 0 && (
+                      <div className="overflow-x-auto pt-1">
+                        <table className="w-full text-left text-[11px] border-collapse">
+                          <thead>
+                            <tr className="border-b border-slate-200 text-slate-500">
+                              <th className="py-1 pr-2">Period</th>
+                              <th className="py-1 px-2 text-right">N</th>
+                              <th className="py-1 px-2 text-right">Base MAE/RMSE</th>
+                              <th className="py-1 pl-2 text-right">RF MAE/RMSE</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100 font-mono-tabular">
+                            {actualDataset.evaluationReport.timePeriodBreakdown.map((row) => (
+                              <tr key={row.period}>
+                                <td className="py-1 pr-2 font-sans text-slate-700">{row.period}</td>
+                                <td className="py-1 px-2 text-right text-slate-500">{row.sampleCount}</td>
+                                <td className="py-1 px-2 text-right text-slate-900">
+                                  {row.baselineMae} / {row.baselineRmse}
+                                </td>
+                                <td className="py-1 pl-2 text-right text-teal-800">
+                                  {row.rfMae !== null ? `${row.rfMae} / ${row.rfRmse}` : '—'}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
                 </div>
               ) : (
                 <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-900">
@@ -1037,15 +1137,42 @@ export function DataExplorer({
           <div className="bg-slate-900 text-slate-100 rounded-lg p-3.5 font-mono text-[11px] space-y-1 overflow-x-auto">
             <div className="text-teal-300 flex items-center gap-1.5">
               <Database className="w-3.5 h-3.5" />
-              Active API & FastAPI / PostGIS Endpoints
+              Active API & Streaming Endpoints
             </div>
             <div>POST /api/v1/etm/ingest-upload  # Stream .csv or .zip to disk</div>
             <div>POST /api/v1/etm/ingest-url     # Download & stream remote dataset</div>
             <div>POST /api/v1/gtfs/ingest        # Parse GTFS .txt or .zip archive</div>
+            <div>GET  /api/v1/analytics/segments # Paginated pre-aggregated segments</div>
+            <div>GET  /api/v1/analytics/hotspots # Recurring crowding hotspots</div>
             <div>GET  /api/v1/dataset/status     # Inspect active server dataset</div>
           </div>
         </section>
       </div>
+
+      {/* 6. Technical Architecture Documentation & Live Hackathon Readiness */}
+      <details className="bg-white border border-slate-200 rounded-xl p-5 sm:p-6">
+        <summary className="cursor-pointer font-display text-base font-bold text-slate-900 select-none">
+          Technical System Documentation (14 Sections) &amp; Live Readiness Matrix
+        </summary>
+        <div className="mt-4 pt-4 border-t border-slate-100 grid grid-cols-1 md:grid-cols-2 gap-4 text-xs text-slate-600 leading-relaxed">
+          <div className="space-y-2">
+            <p><strong>1. Problem &amp; Concept:</strong> Standard bus planners minimize travel time/transfers alone; CrowdSense adds stop-segment predicted occupancy so riders avoid overloaded corridors.</p>
+            <p><strong>2. Architecture:</strong> React 19 + TypeScript SPA backed by an Express + Node disk-streaming processor (<code className="font-mono">server.ts</code>) and optional Python FastAPI worker (<code className="font-mono">backend/</code>).</p>
+            <p><strong>3. Data Sources &amp; Schema:</strong> 9-field ETM ticket records (<code className="font-mono">created_at, vehicle_number, route, start_stop_name, end_stop_name, passenger_count, amount, ticket_type_id, is_ac</code>) normalized to <code className="font-mono">Asia/Kolkata</code> + static GTFS 6-file feed.</p>
+            <p><strong>4. Cleaning &amp; GTFS Mapping:</strong> Bounded streaming deduplication, negative/zero passenger filtering, and multi-pass normalized stop matching with explicit ambiguous/unmatched reporting.</p>
+            <p><strong>5. Passenger Load Logic:</strong> <code className="font-mono">Load[s] = max(0, Prev + Boarding - Alighting)</code> after chronological vehicle+route layover (45m) and GTFS direction-reversal trip splitting.</p>
+            <p><strong>6. Crowding Classification &amp; Models:</strong> Historical Median Baseline (with fallback hierarchy) vs. 12-tree Random Forest Regressor across 70%/100%/120% capacity thresholds.</p>
+            <p><strong>7. Confidence &amp; Explainability:</strong> Multi-factor scoring over observation depth, weekly CV, GTFS stop matching, trip reliability, and missingness; missing segments never score as low crowding.</p>
+          </div>
+          <div className="space-y-2">
+            <p><strong>8. Evaluation &amp; Weekly Consistency:</strong> Strict chronological train/test split reporting overall, per-route, and per-period MAE/RMSE against ticket-derived loads (not physical headcounts).</p>
+            <p><strong>9. Journey Graph &amp; Recommendations:</strong> Time-dependent directed GTFS graph supporting direct, 1-transfer, 2-transfer, calendar filtering, walking links (&le;350m), and configurable Balanced weights.</p>
+            <p><strong>10. Crowding Map &amp; Analytics:</strong> Leaflet OpenStreetMap corridor explorer + 7 Recharts views, stability diagnostics, recurring hotspots, and 5 filtered CSV exports.</p>
+            <p><strong>11. Live Verification Snapshot:</strong> Demo Holdout Test N={demoEvaluationReport.testCount} (Base RMSE {demoEvaluationReport.baselineMetrics?.rmse ?? 'N/A'} vs RF RMSE {demoEvaluationReport.randomForestMetrics?.rmse ?? 'N/A'}); Actual Dataset: {actualDataset ? `${actualDataset.validRecords.toLocaleString()} valid rows (${actualDataset.status})` : 'Not ingested in current session'}; GTFS: {gtfsData ? `${gtfsData.stops.length} stops, ${gtfsData.routes.length} routes` : 'Using Demo corridor catalog'}.</p>
+            <p><strong>12. Remaining Scope:</strong> Live bus GPS/AVL feeds, physical APC/CCTV occupancy sensors, and full 2.56M-row trip reconstruction beyond the 16k stratified reservoir sample remain future production extensions.</p>
+          </div>
+        </div>
+      </details>
     </div>
   );
 }

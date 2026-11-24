@@ -143,6 +143,24 @@ export interface ModelEvaluationMetrics {
   evaluatedSamples: number;
 }
 
+export interface RouteEvaluationBreakdown {
+  routeNumber: string;
+  sampleCount: number;
+  baselineMae: number;
+  baselineRmse: number;
+  rfMae: number | null;
+  rfRmse: number | null;
+}
+
+export interface TimePeriodEvaluationBreakdown {
+  period: string;
+  sampleCount: number;
+  baselineMae: number;
+  baselineRmse: number;
+  rfMae: number | null;
+  rfRmse: number | null;
+}
+
 export interface ModelEvaluationReport {
   status: 'evaluated' | 'insufficient_data';
   reason: string;
@@ -154,6 +172,9 @@ export interface ModelEvaluationReport {
   baselineMetrics: ModelEvaluationMetrics | null;
   randomForestMetrics: ModelEvaluationMetrics | null;
   winner: PredictionModelType | null;
+  routeBreakdown?: RouteEvaluationBreakdown[];
+  timePeriodBreakdown?: TimePeriodEvaluationBreakdown[];
+  evaluationGroundTruthNote?: string;
 }
 
 export interface SegmentObservation {
@@ -514,6 +535,46 @@ export interface ActualDatasetResult {
   activeRoutes: BusRoute[];
   activeStops: BusStop[];
   truncatedForBrowser: boolean;
+}
+
+export interface WeeklyStabilityPeriodMetric {
+  label: string;
+  avgLoad: number;
+  observationCount: number;
+  stabilityPct: number;
+  meanCv: number;
+  reliable: boolean;
+}
+
+export interface WeeklyStabilityRouteMetric {
+  routeNumber: string;
+  segmentSlots: number;
+  totalObservations: number;
+  stabilityPct: number;
+  meanCv: number;
+  status: 'Consistent' | 'Moderate Variance' | 'Unstable' | 'Insufficient Data';
+}
+
+export interface WeeklyStabilitySegmentAlert {
+  routeNumber: string;
+  direction: 'UP' | 'DOWN';
+  fromStop: string;
+  toStop: string;
+  hour: number;
+  dayType: DayType;
+  medianLoad: number;
+  observationsCount: number;
+  weeklyCvPct: number;
+  weeklyConsistencyPct: number;
+}
+
+export interface WeeklyStabilityReport {
+  periods: WeeklyStabilityPeriodMetric[];
+  routeStability: WeeklyStabilityRouteMetric[];
+  consistentHotspots: WeeklyStabilitySegmentAlert[];
+  unstableSegments: WeeklyStabilitySegmentAlert[];
+  insufficientDataRoutes: string[];
+  unreliableTimePeriods: string[];
 }
 
 

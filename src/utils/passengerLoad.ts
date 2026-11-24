@@ -9,6 +9,7 @@ import type {
   SegmentObservation,
 } from '../types/transit.ts';
 import { STOP_MAP } from '../data/sampleStops.ts';
+import { normalizeToAsiaKolkata, type NormalizedISTTimestamp } from './timeIst.ts';
 
 export interface ReconstructedTripSegment {
   segmentOrder: number;
@@ -105,20 +106,23 @@ export function matchStopToRoute(
   for (const seq of route.stops) {
     const stop = stopLookup[seq.stop_id];
     if (!stop) continue;
-    const full = stop.stop_name.toLowerCase();
-    const short = stop.short_name.toLowerCase();
-    if (full === normalized || short === normalized) {
+    const full = stop.stop_name.toLowerCase().trim();
+    const short = (stop.short_name ?? '').toLowerCase().trim();
+    if (full === normalized || (short.length > 0 && short === normalized)) {
       return { stopId: seq.stop_id, sequence: seq.stop_sequence };
     }
   }
 
-  // Pass 2: safe substring match
+  // Pass 2: safe substring match (guard against empty short_name or 1-char false positives)
   for (const seq of route.stops) {
     const stop = stopLookup[seq.stop_id];
     if (!stop) continue;
-    const full = stop.stop_name.toLowerCase();
-    const short = stop.short_name.toLowerCase();
-    if (full.includes(normalized) || normalized.includes(short)) {
+    const full = stop.stop_name.toLowerCase().trim();
+    const short = (stop.short_name ?? '').toLowerCase().trim();
+    if (
+      (normalized.length >= 3 && full.includes(normalized)) ||
+      (short.length >= 2 && normalized.includes(short))
+    ) {
       return { stopId: seq.stop_id, sequence: seq.stop_sequence };
     }
   }
@@ -131,7 +135,7 @@ export function matchStopToRoute(
  */
 export function validateTicketRecord(
   ticket: Partial<ETMTicketRecord>
-): { valid: boolean; reason?: string; parsedDate?: Date } {
+): { valid: boolean; reason?: string; parsedDate?: Date; ist?: NormalizedISTTimestamp } {
   if (!ticket.vehicle_number || String(ticket.vehicle_number).trim() === '') {
     return { valid: false, reason: 'Missing vehicle_number' };
   }
@@ -162,12 +166,12 @@ export function validateTicketRecord(
   }
 
   const createdStr = String(ticket.created_at ?? '').trim();
-  const parsedDate = new Date(createdStr.replace(' ', 'T'));
-  if (!createdStr || Number.isNaN(parsedDate.getTime())) {
+  const ist = normalizeToAsiaKolkata(createdStr);
+  if (!createdStr || !ist) {
     return { valid: false, reason: 'Unparseable created_at timestamp' };
   }
 
-  return { valid: true, parsedDate };
+  return { valid: true, parsedDate: new Date(ist.istEpochMs), ist };
 }
 
 function inferTicketDirection(
@@ -204,23 +208,26 @@ export function reconstructTripsDetailed(
   stopLookup: Record<string, BusStop> = STOP_MAP
 ): BatchReconstructionSummary {
   const invalidTickets: InvalidTicketEntry[] = [];
-  const validEntries: { ticket: ETMTicketRecord; parsedDate: Date }[] = [];
+  const validEntries: { ticket: ETMTicketRecord; ist: NormalizedISTTimestamp }[] = [];
 
   tickets.forEach((ticket, idx) => {
     const check = validateTicketRecord(ticket);
-    if (!check.valid || !check.parsedDate) {
+    if (!check.valid || !check.ist) {
       invalidTickets.push({
         ticketIndex: idx,
         reason: check.reason ?? 'Invalid record',
         ticket,
       });
     } else {
-      validEntries.push({ ticket, parsedDate: check.parsedDate });
+      validEntries.push({ ticket, ist: check.ist });
     }
   });
 
   // Group chronologically per vehicle + route
-  const vehicleRouteBuckets = new Map<string, { ticket: ETMTicketRecord; parsedDate: Date }[]>();
+  const vehicleRouteBuckets = new Map<
+    string,
+    { ticket: ETMTicketRecord; ist: NormalizedISTTimestamp }[]
+  >();
   validEntries.forEach((entry) => {
     const vrKey = `${entry.ticket.vehicle_number.trim().toUpperCase()}|${entry.ticket.route
       .trim()
@@ -233,15 +240,15 @@ export function reconstructTripsDetailed(
   const trips: TripReconstructionResult[] = [];
 
   vehicleRouteBuckets.forEach((entries, vrKey) => {
-    entries.sort((a, b) => a.parsedDate.getTime() - b.parsedDate.getTime());
+    entries.sort((a, b) => a.ist.istEpochMs - b.ist.istEpochMs);
     const [vehicleNumber, routeNumber] = vrKey.split('|');
     const candidateRoutes = routes.filter(
       (r) => r.route_number.toUpperCase() === routeNumber
     );
 
     // Split into chronological trip clusters using time-gap + direction-reversal detection
-    const clusters: { ticket: ETMTicketRecord; parsedDate: Date }[][] = [];
-    let currentCluster: { ticket: ETMTicketRecord; parsedDate: Date }[] = [];
+    const clusters: { ticket: ETMTicketRecord; ist: NormalizedISTTimestamp }[][] = [];
+    let currentCluster: { ticket: ETMTicketRecord; ist: NormalizedISTTimestamp }[] = [];
     let currentDominantDir: 'UP' | 'DOWN' | 'UNKNOWN' = 'UNKNOWN';
 
     entries.forEach((entry) => {
@@ -252,7 +259,7 @@ export function reconstructTripsDetailed(
       }
 
       const prev = currentCluster[currentCluster.length - 1];
-      const gapMins = (entry.parsedDate.getTime() - prev.parsedDate.getTime()) / (1000 * 60);
+      const gapMins = (entry.ist.istEpochMs - prev.ist.istEpochMs) / (1000 * 60);
       const entryDir = inferTicketDirection(entry.ticket, candidateRoutes, stopLookup);
       const directionReversed =
         currentDominantDir !== 'UNKNOWN' &&
@@ -276,20 +283,17 @@ export function reconstructTripsDetailed(
     }
 
     clusters.forEach((cluster, clusterIdx) => {
-      const firstDate = cluster[0].parsedDate;
-      const lastDate = cluster[cluster.length - 1].parsedDate;
-      const dateStr = `${firstDate.getFullYear()}-${String(firstDate.getMonth() + 1).padStart(
-        2,
-        '0'
-      )}-${String(firstDate.getDate()).padStart(2, '0')}`;
-      const startTimeStr = `${String(firstDate.getHours()).padStart(2, '0')}:${String(
-        firstDate.getMinutes()
+      const firstIst = cluster[0].ist;
+      const lastIst = cluster[cluster.length - 1].ist;
+      const dateStr = firstIst.date;
+      const startTimeStr = `${String(firstIst.hour).padStart(2, '0')}:${String(
+        firstIst.minute
       ).padStart(2, '0')}`;
-      const endTimeStr = `${String(lastDate.getHours()).padStart(2, '0')}:${String(
-        lastDate.getMinutes()
+      const endTimeStr = `${String(lastIst.hour).padStart(2, '0')}:${String(
+        lastIst.minute
       ).padStart(2, '0')}`;
-      const dow = firstDate.getDay();
-      const dayType: DayType = dow === 0 || dow === 6 ? 'weekend' : 'weekday';
+      const dow = firstIst.dayOfWeek;
+      const dayType = firstIst.dayType;
       const tripKey = `${vehicleNumber}|${routeNumber}|${dateStr} ${startTimeStr}#${clusterIdx + 1}`;
       const totalPassengers = cluster.reduce(
         (sum, e) => sum + Math.round(Number(e.ticket.passenger_count)),
@@ -307,7 +311,7 @@ export function reconstructTripsDetailed(
           windowStart: `${dateStr} ${startTimeStr}`,
           windowEnd: `${dateStr} ${endTimeStr}`,
           date: dateStr,
-          hour: firstDate.getHours(),
+          hour: firstIst.hour,
           dayOfWeek: dow,
           dayType,
           ticketCount: cluster.length,
@@ -410,7 +414,7 @@ export function reconstructTripsDetailed(
         });
       }
 
-      const spanMins = (lastDate.getTime() - firstDate.getTime()) / (1000 * 60);
+      const spanMins = (lastIst.istEpochMs - firstIst.istEpochMs) / (1000 * 60);
       const expectedDuration =
         bestRoute.stops[bestRoute.stops.length - 1]?.minutes_from_start ?? 60;
       const unmatchedStopRate =
@@ -453,7 +457,7 @@ export function reconstructTripsDetailed(
         windowStart: `${dateStr} ${startTimeStr}`,
         windowEnd: `${dateStr} ${endTimeStr}`,
         date: dateStr,
-        hour: firstDate.getHours(),
+        hour: firstIst.hour,
         dayOfWeek: dow,
         dayType,
         ticketCount: cluster.length,

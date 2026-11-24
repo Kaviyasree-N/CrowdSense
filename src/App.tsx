@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { DemoNoticeBanner } from './components/DemoNoticeBanner';
+import { DemoWalkthroughDrawer } from './components/DemoWalkthroughDrawer';
 import { AppPage, Navbar } from './components/Navbar';
 import { AnalyticsDashboard } from './pages/AnalyticsDashboard';
 import { CrowdingMap } from './pages/CrowdingMap';
@@ -40,6 +41,8 @@ export default function App() {
   const [actualDataset, setActualDataset] = useState<ActualDatasetResult | null>(null);
   const [gtfsData, setGtfsData] = useState<ProcessedGTFSData | null>(null);
   const [selectedJourneyId, setSelectedJourneyId] = useState<string | null>(null);
+  const [demoGuideOpen, setDemoGuideOpen] = useState(false);
+  const [demoStep, setDemoStep] = useState(1);
 
   // Sync any server-side processed dataset on mount
   useEffect(() => {
@@ -194,12 +197,56 @@ export default function App() {
     setCurrentPage('home');
   };
 
+  const handleSelectDemoStep = (stepNumber: number) => {
+    setDataMode('demo');
+    setDemoStep(stepNumber);
+    const demoQuery: SearchQuery = {
+      sourceStopId: 'DL_ANV',
+      destinationStopId: 'DL_CP',
+      date: '2026-10-14',
+      time: '18:00',
+      preferredCategory: stepNumber === 5 ? 'least-crowded' : 'balanced',
+    };
+
+    if (stepNumber === 1) {
+      setCurrentPage('home');
+    } else if (stepNumber === 2 || stepNumber === 3) {
+      setSearchQuery(demoQuery);
+      storageService.saveLastSearch(demoQuery);
+      setCurrentPage('home');
+    } else if (stepNumber === 4 || stepNumber === 5) {
+      setSearchQuery(demoQuery);
+      storageService.saveLastSearch(demoQuery);
+      setSelectedJourneyId(null);
+      setCurrentPage('results');
+    } else if (stepNumber === 6) {
+      setSearchQuery(demoQuery);
+      storageService.saveLastSearch(demoQuery);
+      setCurrentPage('details');
+    } else if (stepNumber === 7) {
+      setCurrentPage('map');
+    } else if (stepNumber === 8) {
+      setCurrentPage('analytics');
+    } else {
+      setCurrentPage('explorer');
+    }
+  };
+
+  const handleResetDemoAndGuide = () => {
+    setDemoStep(1);
+    handleResetDemo();
+  };
+
   return (
     <div className="min-h-screen flex flex-col bg-[#F8FAFC] text-slate-900">
       <Navbar
         currentPage={currentPage}
         onNavigate={(page) => setCurrentPage(page)}
-        onRunSampleDemo={handleRunSampleDemo}
+        onRunSampleDemo={() => {
+          setDemoGuideOpen(true);
+          setDemoStep(4);
+          handleRunSampleDemo();
+        }}
       />
 
       <DemoNoticeBanner
@@ -208,8 +255,18 @@ export default function App() {
         actualDatasetName={actualDataset?.sourceName ?? (gtfsData ? 'Uploaded GTFS Feed' : undefined)}
         hasUploadedCsv={Boolean(actualDataset)}
         uploadedFileName={actualDataset?.sourceName}
+        demoGuideOpen={demoGuideOpen}
+        onToggleDemoGuide={() => setDemoGuideOpen((prev) => !prev)}
         onSwitchMode={handleSwitchMode}
-        onResetDemo={handleResetDemo}
+        onResetDemo={handleResetDemoAndGuide}
+      />
+
+      <DemoWalkthroughDrawer
+        isOpen={demoGuideOpen}
+        currentStep={demoStep}
+        onSelectStep={handleSelectDemoStep}
+        onClose={() => setDemoGuideOpen(false)}
+        onResetDemo={handleResetDemoAndGuide}
       />
 
       <main className="flex-1">

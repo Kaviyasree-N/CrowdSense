@@ -668,6 +668,130 @@ export function AnalyticsDashboard({
         </ResponsiveContainer>
       </AnalyticsChart>
 
+      {/* Week-to-Week Stability & Unreliable Estimate Diagnostics */}
+      <section className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-100">
+          <div>
+            <h2 className="font-display text-base font-bold text-slate-900">
+              Week-to-Week Stability &amp; Unreliable Estimate Diagnostics
+            </h2>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Compares week-to-week variance across weekday morning, weekday evening, weekend, route-level, and segment-level predictions.
+            </p>
+          </div>
+          <span className="text-[11px] font-mono-tabular text-slate-600">
+            {summary.weeklyStability.consistentHotspots.length} consistent hotspot(s) ·{' '}
+            {summary.weeklyStability.unstableSegments.length} high-variance slot(s)
+          </span>
+        </div>
+
+        {/* Period Stability Summary */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          {summary.weeklyStability.periods.map((p) => (
+            <div key={p.label} className="rounded-lg border border-slate-200 bg-slate-50/70 p-3.5 space-y-1.5">
+              <div className="flex items-center justify-between gap-2 text-xs">
+                <span className="font-semibold text-slate-900">{p.label}</span>
+                <span
+                  className={`text-[10px] font-mono-tabular font-semibold px-2 py-0.5 rounded border ${
+                    p.reliable
+                      ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                      : 'bg-amber-50 text-amber-800 border-amber-200'
+                  }`}
+                >
+                  {p.observationCount === 0
+                    ? 'No Data'
+                    : p.reliable
+                    ? 'Stable Pattern'
+                    : 'High Variance / Low Obs'}
+                </span>
+              </div>
+              <div className="font-mono-tabular text-xs text-slate-700">
+                Avg Load: <strong className="text-slate-900">{p.avgLoad} pax</strong> · Stability:{' '}
+                <strong className="text-slate-900">{p.stabilityPct}%</strong> (CV {(p.meanCv * 100).toFixed(0)}%)
+              </div>
+              <div className="text-[11px] text-slate-500 font-mono-tabular">
+                {p.observationCount.toLocaleString()} historical segment observations
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Route Stability & Segment Caveats */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 text-xs">
+          <div className="border border-slate-200 rounded-lg p-3.5 space-y-2">
+            <div className="font-semibold text-slate-900">Route-Level Weekly Consistency</div>
+            <div className="max-h-44 overflow-y-auto divide-y divide-slate-100">
+              {summary.weeklyStability.routeStability.slice(0, 10).map((r) => (
+                <div key={r.routeNumber} className="py-1.5 flex items-center justify-between gap-2">
+                  <span className="font-mono-tabular font-semibold text-slate-800">
+                    Route {r.routeNumber}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono-tabular text-[11px] text-slate-500">
+                      {r.totalObservations} obs · {r.stabilityPct}% stable
+                    </span>
+                    <span
+                      className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border ${
+                        r.status === 'Consistent'
+                          ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                          : r.status === 'Moderate Variance'
+                          ? 'bg-slate-100 text-slate-700 border-slate-200'
+                          : r.status === 'Unstable'
+                          ? 'bg-amber-50 text-amber-800 border-amber-200'
+                          : 'bg-red-50 text-red-700 border-red-200'
+                      }`}
+                    >
+                      {r.status}
+                    </span>
+                  </div>
+                </div>
+              ))}
+              {summary.weeklyStability.routeStability.length === 0 && (
+                <div className="py-3 text-slate-500">No route stability rows in current filter.</div>
+              )}
+            </div>
+          </div>
+
+          <div className="border border-slate-200 rounded-lg p-3.5 space-y-2.5">
+            <div>
+              <div className="font-semibold text-slate-900">
+                Unstable Predictions &amp; Unreliable Periods
+              </div>
+              {summary.weeklyStability.unstableSegments.length > 0 ? (
+                <ul className="mt-1 space-y-1 text-[11px] text-slate-600">
+                  {summary.weeklyStability.unstableSegments.slice(0, 4).map((u, idx) => (
+                    <li key={`${u.routeNumber}-${u.fromStop}-${idx}`} className="truncate">
+                      <span className="font-mono-tabular font-semibold text-amber-800">
+                        R{u.routeNumber} {String(u.hour).padStart(2, '0')}:00 ({u.dayType})
+                      </span>{' '}
+                      {u.fromStop} → {u.toStop} · {u.weeklyCvPct}% CV ({u.observationsCount} obs)
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="mt-1 text-[11px] text-slate-500">
+                  All active filtered segments have weekly CV &le; 25% and &ge; 8 observations.
+                </p>
+              )}
+            </div>
+
+            {summary.weeklyStability.insufficientDataRoutes.length > 0 && (
+              <div className="pt-2 border-t border-slate-100 text-[11px] text-amber-900">
+                <strong>Insufficient-Data Routes:</strong>{' '}
+                {summary.weeklyStability.insufficientDataRoutes.slice(0, 6).join(', ')}
+              </div>
+            )}
+
+            {summary.weeklyStability.unreliableTimePeriods.length > 0 && (
+              <div className="pt-2 border-t border-slate-100 text-[11px] text-slate-600">
+                <strong>Unreliable Hours (High Variance / Sparse):</strong>{' '}
+                {summary.weeklyStability.unreliableTimePeriods.slice(0, 4).join(' · ')}
+              </div>
+            )}
+          </div>
+        </div>
+      </section>
+
       {/* Critical Crowding Hotspots (Recurring Overload Prioritized) */}
       <section className="bg-white border border-slate-200 rounded-xl overflow-hidden">
         <div className="px-5 py-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">

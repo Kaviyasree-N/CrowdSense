@@ -6,6 +6,10 @@ import type {
   DayType,
   SegmentObservation,
   TransportPlanningInsight,
+  WeeklyStabilityPeriodMetric,
+  WeeklyStabilityReport,
+  WeeklyStabilityRouteMetric,
+  WeeklyStabilitySegmentAlert,
 } from '../types/transit.ts';
 import { classifyCrowding, DEFAULT_CAPACITY_CONFIG } from './crowdClassification.ts';
 import { evaluateConfidence } from './passengerLoad.ts';
@@ -369,4 +373,177 @@ export function buildDeterministicPlanningInsights(params: {
   }
 
   return insights;
+}
+
+/**
+ * Evaluates week-to-week demand stability across Weekday Morning, Weekday Evening,
+ * Weekend, route-level, and segment-level observations, surfacing consistent hotspots,
+ * unstable predictions (high CV), routes with insufficient data, and unreliable hours.
+ */
+export function computeWeeklyStabilityReport(params: {
+  observations: SegmentObservation[];
+  catalogedRouteNumbers: string[];
+  routeCapacityLookup: Map<string, number>;
+  capacityConfig?: CapacityConfig;
+}): WeeklyStabilityReport {
+  const {
+    observations,
+    catalogedRouteNumbers,
+    routeCapacityLookup,
+    capacityConfig = DEFAULT_CAPACITY_CONFIG,
+  } = params;
+
+  const summarizePeriod = (
+    label: string,
+    slice: SegmentObservation[]
+  ): WeeklyStabilityPeriodMetric => {
+    if (slice.length === 0) {
+      return {
+        label,
+        avgLoad: 0,
+        observationCount: 0,
+        stabilityPct: 0,
+        meanCv: 1,
+        reliable: false,
+      };
+    }
+    const avgLoad = Math.round(
+      slice.reduce((s, o) => s + o.median_load, 0) / slice.length
+    );
+    const totalObs = slice.reduce((s, o) => s + o.observations_count, 0);
+    const meanCv = Number(
+      (slice.reduce((s, o) => s + o.weekly_cv, 0) / slice.length).toFixed(2)
+    );
+    const stabilityPct = Math.max(0, Math.min(100, Math.round((1 - meanCv) * 100)));
+    return {
+      label,
+      avgLoad,
+      observationCount: totalObs,
+      stabilityPct,
+      meanCv,
+      reliable: totalObs >= 15 && meanCv <= 0.25,
+    };
+  };
+
+  const weekdayMorning = observations.filter(
+    (o) => o.day_type === 'weekday' && o.hour >= 6 && o.hour <= 10
+  );
+  const weekdayEvening = observations.filter(
+    (o) => o.day_type === 'weekday' && o.hour >= 16 && o.hour <= 20
+  );
+  const weekendAll = observations.filter((o) => o.day_type === 'weekend');
+
+  const periods: WeeklyStabilityPeriodMetric[] = [
+    summarizePeriod('Weekday Morning Peak (06–10)', weekdayMorning),
+    summarizePeriod('Weekday Evening Peak (16–20)', weekdayEvening),
+    summarizePeriod('Weekend All-Day', weekendAll),
+  ];
+
+  // Route-level stability across all cataloged + observed routes
+  const allRouteNums = Array.from(
+    new Set([...catalogedRouteNumbers, ...observations.map((o) => o.route_number)])
+  );
+  const routeStability: WeeklyStabilityRouteMetric[] = allRouteNums.map((routeNumber) => {
+    const slice = observations.filter((o) => o.route_number === routeNumber);
+    const totalObservations = slice.reduce((s, o) => s + o.observations_count, 0);
+    if (slice.length === 0 || totalObservations < 10) {
+      return {
+        routeNumber,
+        segmentSlots: slice.length,
+        totalObservations,
+        stabilityPct: slice.length > 0
+          ? Math.max(0, Math.round((1 - slice.reduce((s, o) => s + o.weekly_cv, 0) / slice.length) * 100))
+          : 0,
+        meanCv: slice.length > 0
+          ? Number((slice.reduce((s, o) => s + o.weekly_cv, 0) / slice.length).toFixed(2))
+          : 1,
+        status: 'Insufficient Data',
+      };
+    }
+    const meanCv = Number(
+      (slice.reduce((s, o) => s + o.weekly_cv, 0) / slice.length).toFixed(2)
+    );
+    const stabilityPct = Math.max(0, Math.min(100, Math.round((1 - meanCv) * 100)));
+    const status: WeeklyStabilityRouteMetric['status'] =
+      meanCv <= 0.18
+        ? 'Consistent'
+        : meanCv <= 0.25
+        ? 'Moderate Variance'
+        : 'Unstable';
+
+    return {
+      routeNumber,
+      segmentSlots: slice.length,
+      totalObservations,
+      stabilityPct,
+      meanCv,
+      status,
+    };
+  });
+
+  routeStability.sort((a, b) => b.totalObservations - a.totalObservations);
+
+  const insufficientDataRoutes = routeStability
+    .filter((r) => r.status === 'Insufficient Data')
+    .map((r) => `Route ${r.routeNumber} (${r.totalObservations} obs)`);
+
+  // Segment-level consistent hotspots & unstable predictions
+  const toAlert = (o: SegmentObservation): WeeklyStabilitySegmentAlert => ({
+    routeNumber: o.route_number,
+    direction: o.direction,
+    fromStop: o.from_stop_name,
+    toStop: o.to_stop_name,
+    hour: o.hour,
+    dayType: o.day_type,
+    medianLoad: o.median_load,
+    observationsCount: o.observations_count,
+    weeklyCvPct: Math.round(o.weekly_cv * 100),
+    weeklyConsistencyPct: Math.max(0, Math.min(100, Math.round((1 - o.weekly_cv) * 100))),
+  });
+
+  const consistentHotspots = observations
+    .filter((o) => {
+      const cap = routeCapacityLookup.get(o.route_id) ?? capacityConfig.nonAcCapacity;
+      const { level } = classifyCrowding(o.median_load, cap, capacityConfig);
+      return (
+        (level === 'Crowded' || level === 'Very Crowded') &&
+        o.observations_count >= 15 &&
+        o.weekly_cv <= 0.22
+      );
+    })
+    .sort((a, b) => a.weekly_cv - b.weekly_cv || b.median_load - a.median_load)
+    .slice(0, 6)
+    .map(toAlert);
+
+  const unstableSegments = observations
+    .filter((o) => o.weekly_cv > 0.25 || o.observations_count < 8)
+    .sort((a, b) => b.weekly_cv - a.weekly_cv || a.observations_count - b.observations_count)
+    .slice(0, 6)
+    .map(toAlert);
+
+  // Unreliable time periods (by hour/dayType where mean CV > 0.25 or low observation depth)
+  const hourBuckets = new Map<string, { obsSum: number; cvSum: number; count: number }>();
+  observations.forEach((o) => {
+    const key = `${String(o.hour).padStart(2, '0')}:00 (${o.day_type})`;
+    const b = hourBuckets.get(key) ?? { obsSum: 0, cvSum: 0, count: 0 };
+    b.obsSum += o.observations_count;
+    b.cvSum += o.weekly_cv;
+    b.count += 1;
+    hourBuckets.set(key, b);
+  });
+
+  const unreliableTimePeriods = Array.from(hourBuckets.entries())
+    .filter(([, b]) => b.cvSum / b.count > 0.25 || b.obsSum / b.count < 10)
+    .sort((a, b) => b[1].cvSum / b[1].count - a[1].cvSum / a[1].count)
+    .slice(0, 6)
+    .map(([label, b]) => `${label} · ${Math.round((b.cvSum / b.count) * 100)}% CV`);
+
+  return {
+    periods,
+    routeStability,
+    consistentHotspots,
+    unstableSegments,
+    insufficientDataRoutes,
+    unreliableTimePeriods,
+  };
 }

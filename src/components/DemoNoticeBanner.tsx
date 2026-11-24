@@ -1,4 +1,4 @@
-import { RotateCcw, Info, ArrowLeftRight } from 'lucide-react';
+import { RotateCcw, Info, ArrowLeftRight, PlayCircle } from 'lucide-react';
 import type { DataMode } from '../types/transit';
 
 interface DemoNoticeBannerProps {
@@ -7,6 +7,8 @@ interface DemoNoticeBannerProps {
   actualDatasetName?: string;
   hasUploadedCsv: boolean;
   uploadedFileName?: string;
+  demoGuideOpen?: boolean;
+  onToggleDemoGuide?: () => void;
   onSwitchMode: (mode: DataMode) => void;
   onResetDemo: () => void;
 }
@@ -17,6 +19,8 @@ export function DemoNoticeBanner({
   actualDatasetName,
   hasUploadedCsv,
   uploadedFileName,
+  demoGuideOpen = false,
+  onToggleDemoGuide,
   onSwitchMode,
   onResetDemo,
 }: DemoNoticeBannerProps) {
@@ -49,7 +53,22 @@ export function DemoNoticeBanner({
           </span>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          {onToggleDemoGuide && (
+            <button
+              type="button"
+              onClick={onToggleDemoGuide}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded border text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                demoGuideOpen
+                  ? 'bg-slate-900 text-white border-slate-900'
+                  : 'bg-white text-slate-800 border-slate-300 hover:bg-slate-50'
+              }`}
+            >
+              <PlayCircle className="w-3.5 h-3.5 text-teal-600" />
+              10-Step Demo Guide
+            </button>
+          )}
+
           {hasActualDataset && (
             <button
               type="button"

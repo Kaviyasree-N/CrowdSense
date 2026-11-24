@@ -15,12 +15,14 @@ import type {
   SegmentObservation,
   TransportPlanningInsight,
   WeeklyDemandPoint,
+  WeeklyStabilityReport,
 } from '../types/transit';
 import {
   AnalyticsFilterState,
   buildDeterministicPlanningInsights,
   BusiestSegmentRow,
   computeCriticalHotspots,
+  computeWeeklyStabilityReport,
   filterSegmentObservations,
   matchesTimePeriod,
   PaginatedSegmentsResult,
@@ -86,6 +88,7 @@ export interface OperatorAnalyticsSummary {
   criticalHotspots: CriticalHotspotRow[];
   planningInsights: TransportPlanningInsight[];
   reliabilityIndicators: DataReliabilitySummary;
+  weeklyStability: WeeklyStabilityReport;
 }
 
 function computeDemoWeeklyConsistency(
@@ -488,6 +491,13 @@ export const dataService = {
       reliability: reliabilityIndicators,
     });
 
+    const weeklyStability = computeWeeklyStabilityReport({
+      observations: obs,
+      catalogedRouteNumbers: Array.from(uniqueRouteNums),
+      routeCapacityLookup,
+      capacityConfig,
+    });
+
     return {
       kpis: {
         totalTicketsAnalyzed,
@@ -513,6 +523,7 @@ export const dataService = {
       criticalHotspots,
       planningInsights,
       reliabilityIndicators,
+      weeklyStability,
     };
   },
 
@@ -880,6 +891,23 @@ export const dataService = {
       reliability: reliabilityIndicators,
     });
 
+    const actualCatalogRoutes =
+      filters.routeNumber === 'ALL'
+        ? Array.from(
+            new Set([
+              ...actual.activeRoutes.map((r) => r.route_number),
+              ...actual.routeVolume.map((r) => r.routeNumber),
+            ])
+          )
+        : [filters.routeNumber];
+
+    const weeklyStability = computeWeeklyStabilityReport({
+      observations: obs,
+      catalogedRouteNumbers: actualCatalogRoutes,
+      routeCapacityLookup,
+      capacityConfig,
+    });
+
     return {
       kpis: {
         totalTicketsAnalyzed,
@@ -905,6 +933,7 @@ export const dataService = {
       criticalHotspots,
       planningInsights,
       reliabilityIndicators,
+      weeklyStability,
     };
   },
 
