@@ -5,10 +5,12 @@ import type {
   DayType,
   ETMTicketRecord,
   HistoricalSegmentRecord,
+  HourlyDayTypePoint,
   PipelineStageLog,
   ProcessedGTFSData,
   SegmentObservation,
   StopMatchingReport,
+  WeeklyDemandPoint,
 } from '../types/transit.ts';
 import { buildStopMatchingReport, splitCsvLine } from './gtfsProcessor.ts';
 import { evaluateModelsChronologically } from './modelEvaluation.ts';
@@ -256,9 +258,32 @@ export function createEtmStreamProcessor(options: StreamProcessorOptions) {
     passengers: 0,
   }));
 
+  const hourlyDayTypeAgg: HourlyDayTypePoint[] = Array.from({ length: 24 }, (_, hr) => ({
+    hour: `${String(hr).padStart(2, '0')}:00`,
+    hourNum: hr,
+    weekdayTickets: 0,
+    weekdayPassengers: 0,
+    weekendTickets: 0,
+    weekendPassengers: 0,
+  }));
+
   const dailyAgg = new Map<
     string,
     { date: string; dayType: DayType; tickets: number; passengers: number }
+  >();
+
+  const weeklyAgg = new Map<
+    number,
+    {
+      weekNumber: number;
+      tickets: number;
+      passengers: number;
+      weekdayPassengers: number;
+      weekendPassengers: number;
+      dates: Set<string>;
+      minDate: string;
+      maxDate: string;
+    }
   >();
 
   const routeAgg = new Map<
@@ -382,6 +407,15 @@ export function createEtmStreamProcessor(options: StreamProcessorOptions) {
     hourlyAgg[ist.hour].tickets += 1;
     hourlyAgg[ist.hour].passengers += roundedPax;
 
+    const hdEntry = hourlyDayTypeAgg[ist.hour];
+    if (ist.dayType === 'weekday') {
+      hdEntry.weekdayTickets += 1;
+      hdEntry.weekdayPassengers += roundedPax;
+    } else {
+      hdEntry.weekendTickets += 1;
+      hdEntry.weekendPassengers += roundedPax;
+    }
+
     const dEntry = dailyAgg.get(ist.date) ?? {
       date: ist.date,
       dayType: ist.dayType,
@@ -391,6 +425,27 @@ export function createEtmStreamProcessor(options: StreamProcessorOptions) {
     dEntry.tickets += 1;
     dEntry.passengers += roundedPax;
     dailyAgg.set(ist.date, dEntry);
+
+    const dayNum = Number(ist.date.slice(8, 10)) || 1;
+    const weekNumber = Math.min(5, Math.max(1, Math.ceil(dayNum / 7)));
+    const wEntry = weeklyAgg.get(weekNumber) ?? {
+      weekNumber,
+      tickets: 0,
+      passengers: 0,
+      weekdayPassengers: 0,
+      weekendPassengers: 0,
+      dates: new Set<string>(),
+      minDate: ist.date,
+      maxDate: ist.date,
+    };
+    wEntry.tickets += 1;
+    wEntry.passengers += roundedPax;
+    if (ist.dayType === 'weekday') wEntry.weekdayPassengers += roundedPax;
+    else wEntry.weekendPassengers += roundedPax;
+    wEntry.dates.add(ist.date);
+    if (ist.date < wEntry.minDate) wEntry.minDate = ist.date;
+    if (ist.date > wEntry.maxDate) wEntry.maxDate = ist.date;
+    weeklyAgg.set(weekNumber, wEntry);
 
     if (ist.dayType === 'weekday') {
       weekdayTickets += 1;
@@ -643,6 +698,31 @@ export function createEtmStreamProcessor(options: StreamProcessorOptions) {
       passengers: stats.passengers,
     }));
 
+    const weeklyDistribution: WeeklyDemandPoint[] = Array.from(weeklyAgg.values())
+      .sort((a, b) => a.weekNumber - b.weekNumber)
+      .map((w) => {
+        const daysObserved = Math.max(1, w.dates.size);
+        return {
+          weekNumber: w.weekNumber,
+          weekLabel: `Week ${w.weekNumber}`,
+          dateRange:
+            w.minDate === w.maxDate
+              ? w.minDate.slice(5)
+              : `${w.minDate.slice(5)} to ${w.maxDate.slice(5)}`,
+          tickets: w.tickets,
+          passengers: w.passengers,
+          weekdayPassengers: w.weekdayPassengers,
+          weekendPassengers: w.weekendPassengers,
+          daysObserved: w.dates.size,
+          avgDailyPassengers: Math.round(w.passengers / daysObserved),
+        };
+      });
+
+    const totalIdentifiedSegments = activeRoutes.reduce(
+      (sum, r) => sum + Math.max(0, r.stops.length - 1),
+      0
+    );
+
     return {
       datasetId: options.datasetId,
       sourceName: options.sourceName,
@@ -678,7 +758,9 @@ export function createEtmStreamProcessor(options: StreamProcessorOptions) {
       requiredColumnsPresent: [...requiredColumnsPresent],
       missingRequiredColumns: [...missingRequiredColumns],
       hourlyDistribution: hourlyAgg,
+      hourlyDayTypeDistribution: hourlyDayTypeAgg,
       dailyDistribution,
+      weeklyDistribution,
       routeVolume,
       weekdayVsWeekend: {
         weekdayTickets,
@@ -687,6 +769,8 @@ export function createEtmStreamProcessor(options: StreamProcessorOptions) {
         weekendPassengers,
       },
       timePeriodDemand,
+      matchedRoutesCount,
+      totalIdentifiedSegments,
       stopMatchingReport,
       pipelineLogs,
       reconstructedTripsCount,

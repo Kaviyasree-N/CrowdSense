@@ -5,7 +5,11 @@ import { PredictionExplainPanel } from '../components/PredictionExplainPanel';
 import { NetworkMapSegment, RouteMap } from '../components/RouteMap';
 import { SAMPLE_ROUTES } from '../data/sampleRoutes';
 import { SAMPLE_STOPS, STOP_MAP } from '../data/sampleStops';
-import { crowdingService } from '../services/crowdingService';
+import {
+  buildMapNetworkSegments,
+  deriveDayTypeFromDate,
+  MapCrowdingCategoryFilter,
+} from '../services/mapService';
 import type {
   ActualDatasetResult,
   BusStop,
@@ -13,6 +17,7 @@ import type {
   DataMode,
   DayType,
   PredictionModelType,
+  ProcessedGTFSData,
 } from '../types/transit';
 
 interface CrowdingMapProps {
@@ -20,6 +25,7 @@ interface CrowdingMapProps {
   preferredModel: PredictionModelType;
   dataMode?: DataMode;
   actualDataset?: ActualDatasetResult | null;
+  gtfsData?: ProcessedGTFSData | null;
 }
 
 export function CrowdingMap({
@@ -27,17 +33,35 @@ export function CrowdingMap({
   preferredModel,
   dataMode = 'demo',
   actualDataset = null,
+  gtfsData = null,
 }: CrowdingMapProps) {
+  const isActual = dataMode === 'actual' && Boolean(actualDataset || gtfsData);
+  const initialDate =
+    isActual && actualDataset?.dateRangeIST.start && actualDataset.dateRangeIST.start !== 'N/A'
+      ? actualDataset.dateRangeIST.start
+      : '2026-10-14';
+
+  const [selectedDate, setSelectedDate] = useState<string>(initialDate);
   const [selectedHour, setSelectedHour] = useState<number>(18);
-  const [dayType, setDayType] = useState<DayType>('weekday');
+  const [dayType, setDayType] = useState<DayType>(() => deriveDayTypeFromDate(initialDate).dayType);
   const [routeFilter, setRouteFilter] = useState<string>('ALL');
   const [directionFilter, setDirectionFilter] = useState<'ALL' | 'UP' | 'DOWN'>('ALL');
+  const [crowdingFilter, setCrowdingFilter] = useState<MapCrowdingCategoryFilter>('ALL');
   const [selectedSegment, setSelectedSegment] = useState<NetworkMapSegment | null>(null);
   const [selectedStop, setSelectedStop] = useState<BusStop | null>(null);
 
-  const isActual = dataMode === 'actual' && Boolean(actualDataset);
-  const activeRoutes = isActual ? actualDataset!.activeRoutes : SAMPLE_ROUTES;
-  const activeStops = isActual ? actualDataset!.activeStops : SAMPLE_STOPS;
+  const activeRoutes = useMemo(() => {
+    if (!isActual) return SAMPLE_ROUTES;
+    if (actualDataset?.activeRoutes?.length) return actualDataset.activeRoutes;
+    return gtfsData?.routes ?? [];
+  }, [isActual, actualDataset, gtfsData]);
+
+  const activeStops = useMemo(() => {
+    if (!isActual) return SAMPLE_STOPS;
+    if (actualDataset?.activeStops?.length) return actualDataset.activeStops;
+    return gtfsData?.stops ?? [];
+  }, [isActual, actualDataset, gtfsData]);
+
   const stopLookup = useMemo(
     () =>
       isActual
@@ -47,75 +71,53 @@ export function CrowdingMap({
   );
 
   const uniqueRouteNumbers = useMemo(
-    () => Array.from(new Set(activeRoutes.map((r) => r.route_number))).slice(0, 150),
+    () => Array.from(new Set(activeRoutes.map((r) => r.route_number))).slice(0, 200),
     [activeRoutes]
   );
 
+  const dateBounds = useMemo(() => {
+    if (isActual && actualDataset?.dateRangeIST.start && actualDataset.dateRangeIST.start !== 'N/A') {
+      return { min: actualDataset.dateRangeIST.start, max: actualDataset.dateRangeIST.end };
+    }
+    return { min: '2026-10-01', max: '2026-10-31' };
+  }, [isActual, actualDataset]);
+
   const networkSegments = useMemo<NetworkMapSegment[]>(() => {
-    const depTimeStr = `${String(selectedHour).padStart(2, '0')}:00`;
-    const dayOfWeek = dayType === 'weekend' ? 6 : 3;
-    const segments: NetworkMapSegment[] = [];
+    const derivedDow = deriveDayTypeFromDate(selectedDate).dayOfWeek;
+    const effectiveDow =
+      dayType === 'weekend'
+        ? derivedDow === 0 || derivedDow === 6
+          ? derivedDow
+          : 6
+        : derivedDow === 0 || derivedDow === 6
+        ? 3
+        : derivedDow;
 
-    // Cap rendered routes when ALL is selected on huge GTFS feeds to keep Leaflet responsive
-    const routesToRender =
-      routeFilter === 'ALL' ? activeRoutes.slice(0, 30) : activeRoutes;
-
-    routesToRender.forEach((route) => {
-      if (routeFilter !== 'ALL' && route.route_number !== routeFilter) return;
-      if (directionFilter !== 'ALL' && route.direction !== directionFilter) return;
-
-      for (let i = 0; i < route.stops.length - 1; i++) {
-        const curr = route.stops[i];
-        const next = route.stops[i + 1];
-        const fromStop = stopLookup[curr.stop_id];
-        const toStop = stopLookup[next.stop_id];
-        if (!fromStop || !toStop) continue;
-
-        const duration = Math.max(1, next.minutes_from_start - curr.minutes_from_start);
-        const est = crowdingService.estimateSegment(
-          route,
-          curr.stop_id,
-          next.stop_id,
-          depTimeStr,
-          duration,
-          dayType,
-          capacityConfig,
-          i + 1,
-          dayOfWeek,
-          preferredModel,
-          isActual ? 'actual' : 'demo',
-          stopLookup
-        );
-
-        segments.push({
-          id: `${route.route_id}-${curr.stop_id}-${next.stop_id}`,
-          routeId: route.route_id,
-          routeNumber: route.route_number,
-          direction: route.direction,
-          directionLabel: route.direction_label,
-          fromStop,
-          toStop,
-          estimatedLoad: est.estimated_load,
-          assumedCapacity: est.assumed_capacity,
-          occupancyPct: est.occupancy_pct,
-          crowdingLevel: est.crowding_level,
-          confidence: est.confidence,
-          observationsCount: est.observations_count,
-          predictionExplanation: est.prediction_explanation,
-        });
-      }
+    return buildMapNetworkSegments({
+      routes: activeRoutes,
+      stopLookup,
+      selectedHour,
+      dayType,
+      dayOfWeek: effectiveDow,
+      routeFilter,
+      directionFilter,
+      crowdingFilter,
+      capacityConfig,
+      preferredModel,
+      dataMode: isActual ? 'actual' : 'demo',
+      maxRoutesWhenAll: 40,
     });
-
-    return segments;
   }, [
+    activeRoutes,
+    stopLookup,
+    selectedDate,
     selectedHour,
     dayType,
     routeFilter,
     directionFilter,
+    crowdingFilter,
     capacityConfig,
     preferredModel,
-    activeRoutes,
-    stopLookup,
     isActual,
   ]);
 
@@ -127,6 +129,13 @@ export function CrowdingMap({
         s.toStop.stop_id === selectedStop.stop_id
     );
   }, [selectedStop, networkSegments]);
+
+  const handleDateChange = (nextDate: string) => {
+    setSelectedDate(nextDate);
+    const { dayType: nextDayType } = deriveDayTypeFromDate(nextDate);
+    setDayType(nextDayType);
+    setSelectedSegment(null);
+  };
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 space-y-6">
@@ -142,7 +151,9 @@ export function CrowdingMap({
           <p className="text-sm text-slate-600 mt-1 max-w-2xl">
             Click any colored route segment or bus stop to inspect predicted passenger load from{' '}
             {isActual
-              ? `actual processed ETM records (${actualDataset!.sourceName}).`
+              ? actualDataset
+                ? `actual processed ETM records (${actualDataset.sourceName}).`
+                : 'uploaded static GTFS routes (upload ETM CSV for historical occupancy).'
               : 'historical October 2026 ETM ticket patterns.'}
           </p>
         </div>
@@ -160,15 +171,32 @@ export function CrowdingMap({
 
       {isActual && activeRoutes.length === 0 && (
         <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-xs text-amber-900">
-          Actual ETM dataset is loaded, but no static GTFS route stop sequences (<code className="font-mono">routes.txt</code>, <code className="font-mono">trips.txt</code>, <code className="font-mono">stops.txt</code>, <code className="font-mono">stop_times.txt</code>) have been uploaded yet. Upload GTFS files in Data & Model Explorer to map route corridors.
+          Actual ETM dataset is loaded, but no static GTFS route stop sequences (
+          <code className="font-mono">routes.txt</code>, <code className="font-mono">trips.txt</code>,{' '}
+          <code className="font-mono">stops.txt</code>, <code className="font-mono">stop_times.txt</code>) have been uploaded yet. Upload GTFS files in Data &amp; Model Explorer to map route corridors.
         </div>
       )}
 
       {/* Interactive Map Controls */}
-      <div className="bg-white border border-slate-200 rounded-xl p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 items-end">
+      <div className="bg-white border border-slate-200 rounded-xl p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4 items-end">
+        <div>
+          <label htmlFor="map-date" className="block text-xs font-semibold text-slate-700 mb-1.5">
+            Travel Date
+          </label>
+          <input
+            id="map-date"
+            type="date"
+            min={dateBounds.min}
+            max={dateBounds.max}
+            value={selectedDate}
+            onChange={(e) => handleDateChange(e.target.value)}
+            className="w-full h-9 px-2.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-mono-tabular text-slate-900"
+          />
+        </div>
+
         <div>
           <label htmlFor="map-hour" className="flex items-center justify-between text-xs font-semibold text-slate-700 mb-1.5">
-            <span>Time Window (IST)</span>
+            <span>Hour (IST)</span>
             <span className="font-mono-tabular text-teal-800">
               {String(selectedHour).padStart(2, '0')}:00
             </span>
@@ -179,21 +207,27 @@ export function CrowdingMap({
             min={5}
             max={23}
             value={selectedHour}
-            onChange={(e) => setSelectedHour(Number(e.target.value))}
+            onChange={(e) => {
+              setSelectedHour(Number(e.target.value));
+              setSelectedSegment(null);
+            }}
             className="w-full accent-teal-700 cursor-pointer"
           />
         </div>
 
         <div>
-          <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+          <span className="block text-xs font-semibold text-slate-700 mb-1.5">
             Schedule Pattern
-          </label>
+          </span>
           <div className="grid grid-cols-2 gap-1 p-1 bg-slate-100 rounded-lg">
             {(['weekday', 'weekend'] as DayType[]).map((type) => (
               <button
                 key={type}
                 type="button"
-                onClick={() => setDayType(type)}
+                onClick={() => {
+                  setDayType(type);
+                  setSelectedSegment(null);
+                }}
                 className={`py-1.5 text-xs font-semibold rounded-md capitalize transition-colors cursor-pointer ${
                   dayType === type
                     ? 'bg-white text-slate-900 shadow-sm'
@@ -217,7 +251,7 @@ export function CrowdingMap({
               setRouteFilter(e.target.value);
               setSelectedSegment(null);
             }}
-            className="w-full h-9 px-3 bg-slate-50 border border-slate-300 rounded-lg text-xs font-medium text-slate-900"
+            className="w-full h-9 px-2.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-medium text-slate-900"
           >
             <option value="ALL">All Routes ({uniqueRouteNumbers.length})</option>
             {uniqueRouteNumbers.map((num) => (
@@ -235,14 +269,59 @@ export function CrowdingMap({
           <select
             id="map-dir"
             value={directionFilter}
-            onChange={(e) => setDirectionFilter(e.target.value as 'ALL' | 'UP' | 'DOWN')}
-            className="w-full h-9 px-3 bg-slate-50 border border-slate-300 rounded-lg text-xs font-medium text-slate-900"
+            onChange={(e) => {
+              setDirectionFilter(e.target.value as 'ALL' | 'UP' | 'DOWN');
+              setSelectedSegment(null);
+            }}
+            className="w-full h-9 px-2.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-medium text-slate-900"
           >
-            <option value="ALL">Both Directions (UP & DOWN)</option>
-            <option value="UP">UP Direction Only</option>
-            <option value="DOWN">DOWN Direction Only</option>
+            <option value="ALL">Both (UP &amp; DOWN)</option>
+            <option value="UP">UP Only</option>
+            <option value="DOWN">DOWN Only</option>
           </select>
         </div>
+
+        <div>
+          <label htmlFor="map-crowding" className="block text-xs font-semibold text-slate-700 mb-1.5">
+            Crowding Category
+          </label>
+          <select
+            id="map-crowding"
+            value={crowdingFilter}
+            onChange={(e) => {
+              setCrowdingFilter(e.target.value as MapCrowdingCategoryFilter);
+              setSelectedSegment(null);
+            }}
+            className="w-full h-9 px-2.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-medium text-slate-900"
+          >
+            <option value="ALL">All Categories</option>
+            <option value="Seats Available">Seats Available (&lt;70%)</option>
+            <option value="Standing Room">Standing Room (70–99%)</option>
+            <option value="Crowded">Crowded (100–119%)</option>
+            <option value="Very Crowded">Very Crowded (120%+)</option>
+            <option value="Insufficient Data">Insufficient Data</option>
+          </select>
+        </div>
+      </div>
+
+      {/* Active Segment Count Summary */}
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600 px-1">
+        <span>
+          Displaying <strong className="font-mono-tabular text-slate-900">{networkSegments.length}</strong> corridor segments
+          {crowdingFilter !== 'ALL' ? ` matching "${crowdingFilter}"` : ''} for{' '}
+          <strong className="font-mono-tabular text-slate-900">
+            {selectedDate} · {String(selectedHour).padStart(2, '0')}:00 ({dayType})
+          </strong>
+        </span>
+        {crowdingFilter !== 'ALL' && (
+          <button
+            type="button"
+            onClick={() => setCrowdingFilter('ALL')}
+            className="text-teal-800 font-semibold hover:underline cursor-pointer"
+          >
+            Clear crowding filter
+          </button>
+        )}
       </div>
 
       {/* Map + Inspection Sidebar */}
@@ -262,7 +341,7 @@ export function CrowdingMap({
               setSelectedStop(stop);
               setSelectedSegment(null);
             }}
-            heightClass="h-[520px]"
+            heightClass="h-[540px]"
           />
         </div>
 
@@ -275,7 +354,7 @@ export function CrowdingMap({
                     Route {selectedSegment.routeNumber} · {selectedSegment.direction} Direction
                   </div>
                   <h2 className="font-display text-lg font-bold text-slate-900 mt-0.5">
-                    {selectedSegment.fromStop.short_name} → {selectedSegment.toStop.short_name}
+                    {selectedSegment.fromStop.stop_name} → {selectedSegment.toStop.stop_name}
                   </h2>
                   <p className="text-xs text-slate-500">{selectedSegment.directionLabel}</p>
                 </div>
@@ -283,40 +362,75 @@ export function CrowdingMap({
 
               <div className="space-y-2">
                 <div className="text-xs text-slate-500">Historical Predicted Crowding</div>
-                <CrowdBadge
-                  level={selectedSegment.crowdingLevel}
-                  occupancyPct={selectedSegment.occupancyPct}
-                  passengerLoad={selectedSegment.estimatedLoad}
-                  capacity={selectedSegment.assumedCapacity}
-                />
+                {selectedSegment.hasHistoricalData === false ? (
+                  <div className="inline-flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-slate-300 bg-slate-100 text-slate-700 text-xs font-semibold">
+                    <span className="w-2.5 h-2.5 rounded-full bg-slate-400" />
+                    Insufficient Data (No ETM Segment History)
+                  </div>
+                ) : (
+                  <CrowdBadge
+                    level={selectedSegment.crowdingLevel}
+                    occupancyPct={selectedSegment.occupancyPct}
+                    passengerLoad={selectedSegment.estimatedLoad}
+                    capacity={selectedSegment.assumedCapacity}
+                  />
+                )}
                 <div className="pt-1">
                   <ConfidenceTag confidence={selectedSegment.confidence} />
                 </div>
               </div>
 
               <div className="divide-y divide-slate-100 text-xs">
-                <div className="py-2 flex justify-between">
-                  <span className="text-slate-500">Time Window</span>
-                  <span className="font-mono-tabular font-semibold text-slate-900">
-                    {String(selectedHour).padStart(2, '0')}:00 ({dayType})
+                <div className="py-2 flex justify-between gap-2">
+                  <span className="text-slate-500">Starting Stop</span>
+                  <span className="font-medium text-slate-900 text-right">
+                    {selectedSegment.fromStop.stop_name}
                   </span>
                 </div>
-                <div className="py-2 flex justify-between">
-                  <span className="text-slate-500">Estimated Load</span>
-                  <span className="font-mono-tabular font-semibold text-slate-900">
-                    {selectedSegment.estimatedLoad} passengers
+                <div className="py-2 flex justify-between gap-2">
+                  <span className="text-slate-500">Ending Stop</span>
+                  <span className="font-medium text-slate-900 text-right">
+                    {selectedSegment.toStop.stop_name}
                   </span>
                 </div>
-                <div className="py-2 flex justify-between">
+                <div className="py-2 flex justify-between gap-2">
+                  <span className="text-slate-500">Selected Time Period</span>
+                  <span className="font-mono-tabular font-semibold text-slate-900 text-right">
+                    {selectedDate} · {String(selectedHour).padStart(2, '0')}:00 ({dayType})
+                  </span>
+                </div>
+                <div className="py-2 flex justify-between gap-2">
+                  <span className="text-slate-500">Estimated Passenger Load</span>
+                  <span className="font-mono-tabular font-semibold text-slate-900">
+                    {selectedSegment.hasHistoricalData === false
+                      ? 'Insufficient historical data'
+                      : `${selectedSegment.estimatedLoad} passengers`}
+                  </span>
+                </div>
+                <div className="py-2 flex justify-between gap-2">
                   <span className="text-slate-500">Assumed Vehicle Capacity</span>
                   <span className="font-mono-tabular font-semibold text-slate-900">
                     {selectedSegment.assumedCapacity} passengers
                   </span>
                 </div>
-                <div className="py-2 flex justify-between">
+                <div className="py-2 flex justify-between gap-2">
+                  <span className="text-slate-500">Occupancy Percentage</span>
+                  <span className="font-mono-tabular font-semibold text-slate-900">
+                    {selectedSegment.hasHistoricalData === false
+                      ? 'N/A'
+                      : `${selectedSegment.occupancyPct}%`}
+                  </span>
+                </div>
+                <div className="py-2 flex justify-between gap-2">
                   <span className="text-slate-500">Historical Observations</span>
                   <span className="font-mono-tabular font-semibold text-slate-900">
                     {selectedSegment.observationsCount} trips
+                  </span>
+                </div>
+                <div className="py-2 flex justify-between gap-2">
+                  <span className="text-slate-500">Prediction Confidence</span>
+                  <span className="font-semibold text-slate-900">
+                    {selectedSegment.confidence}
                   </span>
                 </div>
               </div>
@@ -336,7 +450,10 @@ export function CrowdingMap({
                   {selectedStop.stop_name}
                 </h2>
                 <div className="text-xs font-mono-tabular text-slate-500 mt-0.5">
-                  {selectedStop.lat.toFixed(4)}° N, {selectedStop.lng.toFixed(4)}° E
+                  {selectedStop.hasValidCoordinates !== false &&
+                  !(selectedStop.lat === 0 && selectedStop.lng === 0)
+                    ? `${selectedStop.lat.toFixed(4)}° N, ${selectedStop.lng.toFixed(4)}° E`
+                    : 'Coordinates not provided in stops.txt'}
                 </div>
               </div>
 
@@ -357,15 +474,26 @@ export function CrowdingMap({
                           Route {seg.routeNumber} ({seg.direction})
                         </span>
                         <span className="font-mono-tabular text-slate-500">
-                          {seg.occupancyPct}%
+                          {seg.hasHistoricalData === false ? 'N/A' : `${seg.occupancyPct}%`}
                         </span>
                       </div>
                       <div className="text-xs text-slate-600">
                         {seg.fromStop.short_name} → {seg.toStop.short_name}
                       </div>
-                      <CrowdBadge level={seg.crowdingLevel} compact />
+                      {seg.hasHistoricalData === false ? (
+                        <span className="inline-block text-[10px] font-medium px-2 py-0.5 rounded bg-slate-100 text-slate-600 border border-slate-200">
+                          Insufficient Data
+                        </span>
+                      ) : (
+                        <CrowdBadge level={seg.crowdingLevel} compact />
+                      )}
                     </button>
                   ))}
+                  {stopConnections.length === 0 && (
+                    <div className="text-xs text-slate-500 py-4 text-center">
+                      No filtered segments serve this stop for the selected filters.
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -379,13 +507,13 @@ export function CrowdingMap({
                   Select a Route Segment or Stop
                 </h2>
                 <p className="text-xs text-slate-600 leading-relaxed">
-                  Click any colored polyline or bus stop marker on the map to view predicted passenger occupancy, assumed capacity, and historical data confidence.
+                  Click any colored polyline or bus stop marker on the map to view predicted passenger occupancy, assumed capacity, historical observation depth, and prediction confidence.
                 </p>
               </div>
               <div className="pt-2 border-t border-slate-100 flex items-start gap-2 text-xs text-slate-500">
                 <Info className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
                 <span>
-                  Colors represent historical pattern estimates for {String(selectedHour).padStart(2, '0')}:00 ({dayType}), not real-time GPS vehicle locations.
+                  Colors represent historical pattern estimates for {selectedDate} at {String(selectedHour).padStart(2, '0')}:00 ({dayType}), not real-time GPS vehicle locations.
                 </span>
               </div>
             </div>

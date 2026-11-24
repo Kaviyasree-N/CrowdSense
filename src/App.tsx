@@ -13,6 +13,7 @@ import { journeyService } from './services/journeyService';
 import { DEFAULT_SEARCH_QUERY, storageService } from './services/storageService';
 import type {
   ActualDatasetResult,
+  BalancedWeightsConfig,
   CapacityConfig,
   DataMode,
   JourneyOption,
@@ -21,6 +22,7 @@ import type {
   SearchQuery,
 } from './types/transit';
 import { DEFAULT_CAPACITY_CONFIG } from './utils/crowdClassification';
+import { DEFAULT_BALANCED_WEIGHTS } from './utils/routeScoring';
 
 export default function App() {
   const [currentPage, setCurrentPage] = useState<AppPage>('home');
@@ -31,6 +33,9 @@ export default function App() {
     storageService.getCapacityConfig()
   );
   const [preferredModel, setPreferredModel] = useState<PredictionModelType>('baseline-median');
+  const [balancedWeights, setBalancedWeights] = useState<BalancedWeightsConfig>(
+    DEFAULT_BALANCED_WEIGHTS
+  );
   const [dataMode, setDataMode] = useState<DataMode>('demo');
   const [actualDataset, setActualDataset] = useState<ActualDatasetResult | null>(null);
   const [gtfsData, setGtfsData] = useState<ProcessedGTFSData | null>(null);
@@ -71,19 +76,23 @@ export default function App() {
   };
 
   const handleSwitchMode = (nextMode: DataMode) => {
-    if (nextMode === 'actual' && !actualDataset) return;
+    if (nextMode === 'actual' && !actualDataset && !gtfsData) return;
     setDataMode(nextMode);
     setSelectedJourneyId(null);
 
+    const actualStops =
+      actualDataset?.activeStops && actualDataset.activeStops.length >= 2
+        ? actualDataset.activeStops
+        : gtfsData?.stops ?? [];
+
     // Update default search stops if switching to Actual GTFS stops or back to Demo
-    if (nextMode === 'actual' && actualDataset && actualDataset.activeStops.length >= 2) {
+    if (nextMode === 'actual' && actualStops.length >= 2) {
       setSearchQuery((prev) => ({
         ...prev,
-        sourceStopId: actualDataset.activeStops[0].stop_id,
-        destinationStopId:
-          actualDataset.activeStops[Math.min(2, actualDataset.activeStops.length - 1)].stop_id,
+        sourceStopId: actualStops[0].stop_id,
+        destinationStopId: actualStops[Math.min(2, actualStops.length - 1)].stop_id,
         date:
-          actualDataset.dateRangeIST.start !== 'N/A'
+          actualDataset && actualDataset.dateRangeIST.start !== 'N/A'
             ? actualDataset.dateRangeIST.start
             : prev.date,
       }));
@@ -93,17 +102,42 @@ export default function App() {
   };
 
   const activeStopsForMode =
-    dataMode === 'actual' && actualDataset ? actualDataset.activeStops : undefined;
+    dataMode === 'actual'
+      ? actualDataset?.activeStops?.length
+        ? actualDataset.activeStops
+        : gtfsData?.stops
+      : undefined;
 
-  const searchResults = useMemo<JourneyOption[]>(
+  const activeRoutesForMode =
+    dataMode === 'actual'
+      ? actualDataset?.activeRoutes?.length
+        ? actualDataset.activeRoutes
+        : gtfsData?.routes ?? []
+      : [];
+
+  const searchDetailedResult = useMemo(
     () =>
-      journeyService.searchJourneys(searchQuery, capacityConfig, preferredModel, {
+      journeyService.searchJourneysDetailed(searchQuery, capacityConfig, preferredModel, {
         dataMode,
-        actualRoutes: actualDataset?.activeRoutes ?? [],
-        actualStops: actualDataset?.activeStops ?? [],
+        actualRoutes: activeRoutesForMode,
+        actualStops: activeStopsForMode ?? [],
+        scheduledTrips: dataMode === 'actual' ? gtfsData?.scheduledTrips : undefined,
+        serviceCalendars: dataMode === 'actual' ? gtfsData?.serviceCalendars : undefined,
+        balancedWeights,
       }),
-    [searchQuery, capacityConfig, preferredModel, dataMode, actualDataset]
+    [
+      searchQuery,
+      capacityConfig,
+      preferredModel,
+      dataMode,
+      activeRoutesForMode,
+      activeStopsForMode,
+      gtfsData,
+      balancedWeights,
+    ]
   );
+
+  const searchResults = searchDetailedResult.journeys;
 
   const selectedJourney = useMemo(
     () => searchResults.find((j) => j.id === selectedJourneyId) ?? searchResults[0] ?? null,
@@ -128,6 +162,7 @@ export default function App() {
       destinationStopId: 'DL_CP',
       date: '2026-10-14',
       time: '18:00',
+      preferredCategory: 'balanced',
     };
     setSearchQuery(demoQuery);
     storageService.saveLastSearch(demoQuery);
@@ -150,6 +185,7 @@ export default function App() {
     void actualDataService.resetServerDataset();
     crowdingService.setUploadedTrainingRecords(null);
     setCapacityConfig(DEFAULT_CAPACITY_CONFIG);
+    setBalancedWeights(DEFAULT_BALANCED_WEIGHTS);
     setDataMode('demo');
     setActualDataset(null);
     setGtfsData(null);
@@ -168,8 +204,8 @@ export default function App() {
 
       <DemoNoticeBanner
         dataMode={dataMode}
-        hasActualDataset={Boolean(actualDataset)}
-        actualDatasetName={actualDataset?.sourceName}
+        hasActualDataset={Boolean(actualDataset || gtfsData)}
+        actualDatasetName={actualDataset?.sourceName ?? (gtfsData ? 'Uploaded GTFS Feed' : undefined)}
         hasUploadedCsv={Boolean(actualDataset)}
         uploadedFileName={actualDataset?.sourceName}
         onSwitchMode={handleSwitchMode}
@@ -192,8 +228,12 @@ export default function App() {
           <JourneyResults
             query={searchQuery}
             journeys={searchResults}
+            searchErrorCode={searchDetailedResult.errorCode}
+            searchErrorMessage={searchDetailedResult.errorMessage}
             capacityConfig={capacityConfig}
             preferredModel={preferredModel}
+            balancedWeights={balancedWeights}
+            onUpdateBalancedWeights={setBalancedWeights}
             onUpdateModel={setPreferredModel}
             onUpdateCapacity={handleUpdateCapacity}
             onSearch={handleSearch}
@@ -215,8 +255,12 @@ export default function App() {
           <JourneyResults
             query={searchQuery}
             journeys={searchResults}
+            searchErrorCode={searchDetailedResult.errorCode}
+            searchErrorMessage={searchDetailedResult.errorMessage}
             capacityConfig={capacityConfig}
             preferredModel={preferredModel}
+            balancedWeights={balancedWeights}
+            onUpdateBalancedWeights={setBalancedWeights}
             onUpdateModel={setPreferredModel}
             onUpdateCapacity={handleUpdateCapacity}
             onSearch={handleSearch}
@@ -233,6 +277,7 @@ export default function App() {
             preferredModel={preferredModel}
             dataMode={dataMode}
             actualDataset={actualDataset}
+            gtfsData={gtfsData}
           />
         )}
 

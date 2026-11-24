@@ -437,6 +437,7 @@ export function predictSegmentCrowding(
   const baselineLoad = stats?.medianLoad ?? null;
 
   const assumedCapacity = query.isAc ? capacityConfig.acCapacity : capacityConfig.nonAcCapacity;
+  const hasHistoricalData = stats !== null || rfLoad !== null;
 
   let predictedLoad: number;
   let modelUsed: PredictionExplanation['modelUsed'];
@@ -451,7 +452,8 @@ export function predictSegmentCrowding(
     predictedLoad = rfLoad;
     modelUsed = 'random-forest';
   } else {
-    // No historical data for this segment: conservative fallback with explicit Low confidence
+    // Missing historical data: keep non-fabricated internal baseline numeric value for API compatibility,
+    // while flagging hasHistoricalData = false so UI & scorer show "Insufficient historical data".
     predictedLoad = Math.round(assumedCapacity * 0.5);
     modelUsed = 'fallback-missing';
   }
@@ -505,7 +507,7 @@ export function predictSegmentCrowding(
   } else {
     confidence = 'Low';
     confidenceReason =
-      'No historical ticket observations found for this route segment and time window.';
+      'Insufficient historical data: no historical ticket observations found for this route segment and time window.';
     confidenceBreakdown = {
       observationsCount: 0,
       weeklyConsistencyPct: 0,
@@ -524,14 +526,14 @@ export function predictSegmentCrowding(
     observationsUsed:
       stats !== null
         ? `${stats.observationsCount} historical trip observations (${baselineModel.dateRangeLabel})`
-        : '0 matching historical observations (conservative 50% fallback)',
+        : '0 matching historical observations (Insufficient historical data)',
     timePeriodConsidered: `${hourStr} · ${dayLabel} (${query.dayType})`,
     calculationMethod:
       modelUsed === 'random-forest'
         ? `Random Forest (12 trees trained on route, direction, segment, hour, day-of-week, and AC flag) predicted ${predictedLoad} pax / ${assumedCapacity} assumed capacity = ${occupancyPct}%.`
         : modelUsed === 'baseline-median'
         ? `Historical median segment load (${predictedLoad} pax) from Load[s] = Prev + Boarding - Alighting, divided by ${assumedCapacity} assumed capacity = ${occupancyPct}%.`
-        : `No segment history available; conservative fallback of ${predictedLoad} pax / ${assumedCapacity} capacity = ${occupancyPct}%.`,
+        : 'Insufficient historical data for this segment; crowding level is not fabricated.',
     assumptions: [
       `Assumed ${query.isAc ? 'AC' : 'Non-AC'} vehicle capacity: ${assumedCapacity} passengers (prototype threshold).`,
       'Ticket destination reflects planned alighting at purchase, not verified physical exit.',
@@ -551,6 +553,7 @@ export function predictSegmentCrowding(
     confidence,
     confidenceReason,
     observationsCount: stats?.observationsCount ?? 0,
+    hasHistoricalData,
     explanation,
   };
 }

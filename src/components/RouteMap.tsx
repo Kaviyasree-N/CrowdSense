@@ -1,7 +1,18 @@
 import L from 'leaflet';
-import { useEffect, useRef } from 'react';
-import { BusStop, CrowdingLevel, JourneyOption, PredictionExplanation } from '../types/transit';
+import { useEffect, useRef, useState } from 'react';
+import { hasRealCoordinates } from '../engine/journeyGraph';
+import type {
+  BusStop,
+  CrowdingLevel,
+  JourneyOption,
+  JourneySegmentEstimate,
+  PredictionExplanation,
+} from '../types/transit';
 import { getCrowdingStyle } from '../utils/crowdClassification';
+
+export function getJourneySegmentKey(seg: JourneySegmentEstimate): string {
+  return `${seg.route_id}-${seg.from_stop.stop_id}-${seg.to_stop.stop_id}-${seg.segment_order}`;
+}
 
 export interface NetworkMapSegment {
   id: string;
@@ -17,6 +28,7 @@ export interface NetworkMapSegment {
   crowdingLevel: CrowdingLevel;
   confidence: 'High' | 'Medium' | 'Low';
   observationsCount: number;
+  hasHistoricalData?: boolean;
   predictionExplanation?: PredictionExplanation;
 }
 
@@ -26,8 +38,10 @@ interface RouteMapProps {
   networkSegments?: NetworkMapSegment[];
   stops?: BusStop[];
   selectedSegmentId?: string | null;
+  selectedJourneySegmentKey?: string | null;
   selectedStopId?: string | null;
   onSelectSegment?: (segment: NetworkMapSegment) => void;
+  onSelectJourneySegment?: (segment: JourneySegmentEstimate) => void;
   onSelectStop?: (stop: BusStop) => void;
   heightClass?: string;
 }
@@ -38,14 +52,17 @@ export function RouteMap({
   networkSegments = [],
   stops = [],
   selectedSegmentId,
+  selectedJourneySegmentKey,
   selectedStopId,
   onSelectSegment,
+  onSelectJourneySegment,
   onSelectStop,
   heightClass = 'h-[420px]',
 }: RouteMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
   const layerGroupRef = useRef<L.LayerGroup | null>(null);
+  const [omittedCoordCount, setOmittedCoordCount] = useState(0);
 
   // Initialize Leaflet map once
   useEffect(() => {
@@ -66,7 +83,6 @@ export function RouteMap({
     mapRef.current = map;
     layerGroupRef.current = group;
 
-    // Fix initial tile sizing in responsive containers
     const timer = setTimeout(() => {
       map.invalidateSize();
     }, 150);
@@ -87,67 +103,133 @@ export function RouteMap({
 
     group.clearLayers();
     const boundsPoints: L.LatLngExpression[] = [];
+    let skippedCoords = 0;
 
     if (mode === 'journey' && journey) {
       journey.all_segments.forEach((seg) => {
+        if (!hasRealCoordinates(seg.from_stop) || !hasRealCoordinates(seg.to_stop)) {
+          skippedCoords += 1;
+          return;
+        }
+        const missing = seg.has_historical_data === false;
         const style = getCrowdingStyle(seg.crowding_level);
+        const segKey = getJourneySegmentKey(seg);
+        const isSelected = selectedJourneySegmentKey === segKey;
+
         const latlngs: L.LatLngExpression[] = [
           [seg.from_stop.lat, seg.from_stop.lng],
           [seg.to_stop.lat, seg.to_stop.lng],
         ];
         boundsPoints.push(...latlngs);
 
+        if (isSelected) {
+          L.polyline(latlngs, {
+            color: '#0F172A',
+            weight: 10,
+            opacity: 0.65,
+          }).addTo(group);
+        }
+
         const polyline = L.polyline(latlngs, {
-          color: style.hex,
-          weight: 6,
-          opacity: 0.92,
+          color: missing ? '#94A3B8' : style.hex,
+          weight: isSelected ? 7 : 6,
+          opacity: isSelected ? 1 : 0.9,
         }).addTo(group);
 
         polyline.bindTooltip(
-          `Route ${seg.route_number}: ${seg.from_stop.short_name} → ${seg.to_stop.short_name}<br/><strong>${seg.crowding_level}</strong> (${seg.occupancy_pct}% · ${seg.estimated_load}/${seg.assumed_capacity} pax)`,
+          missing
+            ? `Route ${seg.route_number}: ${seg.from_stop.short_name} → ${seg.to_stop.short_name}<br/><strong>Insufficient Data</strong> · Click to inspect`
+            : `Route ${seg.route_number}: ${seg.from_stop.short_name} → ${seg.to_stop.short_name}<br/><strong>${seg.crowding_level}</strong> (${seg.occupancy_pct}% · ${seg.estimated_load}/${seg.assumed_capacity} pax) · Click to inspect`,
           { sticky: true }
         );
+
+        polyline.on('click', () => {
+          onSelectJourneySegment?.(seg);
+        });
+      });
+
+      // Draw dashed walking connections if any transfer uses a short walk
+      (journey.transfers_detail ?? []).forEach((t) => {
+        if (
+          t.is_walking_transfer &&
+          hasRealCoordinates(t.from_stop) &&
+          hasRealCoordinates(t.to_stop)
+        ) {
+          const walkLine = L.polyline(
+            [
+              [t.from_stop.lat, t.from_stop.lng],
+              [t.to_stop.lat, t.to_stop.lng],
+            ],
+            {
+              color: '#0F766E',
+              weight: 4,
+              dashArray: '6 6',
+              opacity: 0.9,
+            }
+          ).addTo(group);
+          walkLine.bindTooltip(
+            `Walk transfer: ${t.from_stop.short_name} → ${t.to_stop.short_name} (${t.walk_meters}m, ~${t.walk_mins} min)`,
+            { sticky: true }
+          );
+        }
       });
 
       // Add stop markers for boarding, intermediate, transfer, and destination
-      const uniqueStops = new Map<string, { stop: BusStop; role: string }>();
+      const uniqueStops = new Map<
+        string,
+        { stop: BusStop; role: string; kind: 'terminal' | 'transfer' | 'intermediate' }
+      >();
+
       journey.legs.forEach((leg, lIdx) => {
+        const boardKind = lIdx === 0 ? 'terminal' : 'transfer';
         uniqueStops.set(leg.boarding_stop.stop_id, {
           stop: leg.boarding_stop,
-          role: lIdx === 0 ? 'Boarding Stop' : `Transfer Board (Route ${leg.route_number})`,
+          role:
+            lIdx === 0
+              ? `Boarding Stop (Route ${leg.route_number})`
+              : `Transfer Board (Route ${leg.route_number})`,
+          kind: boardKind,
         });
+
         leg.intermediate_stops.forEach((inter) => {
           if (!uniqueStops.has(inter.stop.stop_id)) {
             uniqueStops.set(inter.stop.stop_id, {
               stop: inter.stop,
-              role: `Intermediate · ${inter.occupancy_pct}% (${inter.crowding_level})`,
+              role:
+                inter.has_historical_data === false
+                  ? 'Intermediate · Insufficient historical data'
+                  : `Intermediate · ${inter.occupancy_pct}% (${inter.crowding_level})`,
+              kind: 'intermediate',
             });
           }
         });
+
+        const isFinal = lIdx === journey.legs.length - 1;
         uniqueStops.set(leg.alighting_stop.stop_id, {
           stop: leg.alighting_stop,
-          role:
-            lIdx === journey.legs.length - 1
-              ? 'Destination Stop'
-              : `Transfer Alight`,
+          role: isFinal ? 'Destination Stop' : `Transfer Alight (Wait at hub)`,
+          kind: isFinal ? 'terminal' : 'transfer',
         });
       });
 
-      uniqueStops.forEach(({ stop, role }) => {
-        const isTerminal =
-          stop.stop_id === journey.source.stop_id ||
-          stop.stop_id === journey.destination.stop_id;
+      uniqueStops.forEach(({ stop, role, kind }) => {
+        if (!hasRealCoordinates(stop)) {
+          skippedCoords += 1;
+          return;
+        }
+        boundsPoints.push([stop.lat, stop.lng]);
 
         const marker = L.circleMarker([stop.lat, stop.lng], {
-          radius: isTerminal ? 8 : 6,
-          fillColor: isTerminal ? '#0F172A' : '#FFFFFF',
+          radius: kind === 'terminal' ? 8.5 : kind === 'transfer' ? 7.5 : 5.5,
+          fillColor:
+            kind === 'terminal' ? '#0F172A' : kind === 'transfer' ? '#0F766E' : '#FFFFFF',
           color: '#0F172A',
           weight: 2.5,
           fillOpacity: 1,
         }).addTo(group);
 
         marker.bindPopup(
-          `<div style="font-size:12px;"><strong>${stop.stop_name}</strong><br/><span style="color:#475569;">${role}</span></div>`
+          `<div style="font-size:12px;"><strong>${stop.stop_name}</strong> (${stop.stop_id})<br/><span style="color:#475569;">${role}</span></div>`
         );
       });
 
@@ -156,10 +238,13 @@ export function RouteMap({
       }
     } else if (mode === 'network') {
       networkSegments.forEach((seg, idx) => {
+        if (!hasRealCoordinates(seg.fromStop) || !hasRealCoordinates(seg.toStop)) {
+          skippedCoords += 1;
+          return;
+        }
         const style = getCrowdingStyle(seg.crowdingLevel);
         const isSelected = selectedSegmentId === seg.id;
 
-        // Slight visual offset so overlapping routes between same stops remain clickable
         const offset = ((idx % 3) - 1) * 0.0011;
         const latlngs: L.LatLngExpression[] = [
           [seg.fromStop.lat + offset, seg.fromStop.lng + offset],
@@ -168,13 +253,15 @@ export function RouteMap({
         boundsPoints.push(latlngs[0], latlngs[1]);
 
         const polyline = L.polyline(latlngs, {
-          color: style.hex,
+          color: seg.hasHistoricalData === false ? '#94A3B8' : style.hex,
           weight: isSelected ? 8 : 5,
           opacity: isSelected ? 1 : 0.8,
         }).addTo(group);
 
         polyline.bindTooltip(
-          `Route ${seg.routeNumber} (${seg.direction}): ${seg.fromStop.short_name} → ${seg.toStop.short_name}<br/><strong>${seg.crowdingLevel}</strong> · ${seg.occupancyPct}% predicted`,
+          seg.hasHistoricalData === false
+            ? `Route ${seg.routeNumber} (${seg.direction}): ${seg.fromStop.short_name} → ${seg.toStop.short_name}<br/><strong>Insufficient historical data</strong>`
+            : `Route ${seg.routeNumber} (${seg.direction}): ${seg.fromStop.short_name} → ${seg.toStop.short_name}<br/><strong>${seg.crowdingLevel}</strong> · ${seg.occupancyPct}% predicted`,
           { sticky: true }
         );
 
@@ -184,6 +271,10 @@ export function RouteMap({
       });
 
       stops.forEach((stop) => {
+        if (!hasRealCoordinates(stop)) {
+          skippedCoords += 1;
+          return;
+        }
         const isSelected = selectedStopId === stop.stop_id;
         const marker = L.circleMarker([stop.lat, stop.lng], {
           radius: isSelected ? 8 : stop.is_major_hub ? 6 : 4.5,
@@ -201,15 +292,22 @@ export function RouteMap({
           onSelectStop?.(stop);
         });
       });
+      if (boundsPoints.length > 1) {
+        map.fitBounds(L.latLngBounds(boundsPoints), { padding: [32, 32], maxZoom: 14 });
+      }
     }
+
+    setOmittedCoordCount(skippedCoords);
   }, [
     mode,
     journey,
     networkSegments,
     stops,
     selectedSegmentId,
+    selectedJourneySegmentKey,
     selectedStopId,
     onSelectSegment,
+    onSelectJourneySegment,
     onSelectStop,
   ]);
 
@@ -235,9 +333,15 @@ export function RouteMap({
             <span className="w-3 h-1.5 rounded-sm bg-red-600 inline-block" />
             Very Crowded (120%+)
           </span>
+          <span className="inline-flex items-center gap-1.5">
+            <span className="w-3 h-1.5 rounded-sm bg-slate-400 inline-block" />
+            Insufficient Data
+          </span>
         </div>
         <span className="font-mono-tabular text-slate-500">
-          Historical / Predicted Estimates · OSM Tiles
+          {omittedCoordCount > 0
+            ? `${omittedCoordCount} stop/segment omitted (missing GTFS coords)`
+            : 'Historical / Predicted Estimates · OSM Tiles'}
         </span>
       </div>
     </div>

@@ -1,6 +1,10 @@
 import type {
   BusRoute,
   BusStop,
+  GTFSScheduledStopTime,
+  GTFSScheduledTrip,
+  GTFSServiceCalendar,
+  GTFSServiceCalendarsMap,
   ProcessedGTFSData,
   StopMatchEntry,
   StopMatchingReport,
@@ -53,13 +57,56 @@ export function parseCsvTable(text: string): Record<string, string>[] {
   return rows;
 }
 
-function parseGtfsTimeToMinutes(timeStr: string): number | null {
-  const parts = timeStr.trim().split(':');
+export function parseGtfsTimeToMinutes(timeStr: string): number | null {
+  const trimmed = timeStr.trim();
+  if (!trimmed) return null;
+  const parts = trimmed.split(':');
   if (parts.length < 2) return null;
   const h = Number(parts[0]);
   const m = Number(parts[1]);
-  if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+  if (!Number.isFinite(h) || !Number.isFinite(m) || h < 0 || m < 0 || m > 59) return null;
   return h * 60 + m;
+}
+
+function normalizeGtfsDate(raw: string): string {
+  const digits = raw.replace(/[^0-9]/g, '');
+  return digits.length === 8 ? digits : '';
+}
+
+export function isServiceActiveOnDate(
+  serviceId: string,
+  dateStr: string,
+  serviceCalendars?: GTFSServiceCalendarsMap
+): boolean {
+  if (!serviceCalendars) return true;
+  const hasAnyCalendar =
+    Object.keys(serviceCalendars.calendars).length > 0 ||
+    Object.keys(serviceCalendars.addedDates).length > 0 ||
+    Object.keys(serviceCalendars.removedDates).length > 0;
+  if (!hasAnyCalendar) return true;
+
+  const yyyymmdd = normalizeGtfsDate(dateStr);
+  if (!yyyymmdd) return false;
+
+  const removed = serviceCalendars.removedDates[yyyymmdd];
+  if (removed && removed.includes(serviceId)) {
+    return false;
+  }
+
+  const added = serviceCalendars.addedDates[yyyymmdd];
+  if (added && added.includes(serviceId)) {
+    return true;
+  }
+
+  const cal = serviceCalendars.calendars[serviceId];
+  if (!cal) return false;
+  if (cal.start_date && yyyymmdd < cal.start_date) return false;
+  if (cal.end_date && yyyymmdd > cal.end_date) return false;
+
+  const parsed = new Date(`${yyyymmdd.slice(0, 4)}-${yyyymmdd.slice(4, 6)}-${yyyymmdd.slice(6, 8)}T12:00:00`);
+  if (Number.isNaN(parsed.getTime())) return false;
+  const dow = parsed.getDay();
+  return Boolean(cal.days[dow]);
 }
 
 export function normalizeStopLabel(raw: string): string {
@@ -77,8 +124,8 @@ export function normalizeStopLabel(raw: string): string {
 }
 
 /**
- * Reconstructs static GTFS stops, routes, directions, stop sequences, and service calendars
- * purely from uploaded GTFS text contents. Never invents routes or schedules.
+ * Reconstructs static GTFS stops, routes, directions, stop sequences, scheduled trips,
+ * and service calendars purely from uploaded GTFS text contents. Never invents routes or coordinates.
  */
 export function processGTFSFileContents(
   fileMap: Record<string, string>
@@ -105,10 +152,11 @@ export function processGTFSFileContents(
   if (!normalizedFiles['trips.txt']) warnings.push('Missing trips.txt: cannot group stop sequences by direction.');
   if (!normalizedFiles['stop_times.txt']) warnings.push('Missing stop_times.txt: cannot reconstruct stop order or travel times.');
 
-  // 1. Parse stops.txt
+  // 1. Parse stops.txt (never invent missing coordinates)
   const stopRows = normalizedFiles['stops.txt'] ? parseCsvTable(normalizedFiles['stops.txt']) : [];
   const stops: BusStop[] = [];
   const stopIdsSet = new Set<string>();
+  let missingCoordsCount = 0;
 
   stopRows.forEach((row) => {
     const stopId = row['stop_id']?.trim();
@@ -116,18 +164,39 @@ export function processGTFSFileContents(
     if (!stopId || !stopName || stopIdsSet.has(stopId)) return;
     stopIdsSet.add(stopId);
 
-    const lat = Number(row['stop_lat']);
-    const lng = Number(row['stop_lon']);
+    const rawLat = row['stop_lat']?.trim() ?? '';
+    const rawLon = row['stop_lon']?.trim() ?? '';
+    const lat = rawLat !== '' ? Number(rawLat) : NaN;
+    const lng = rawLon !== '' ? Number(rawLon) : NaN;
+    const hasValidCoordinates =
+      Number.isFinite(lat) &&
+      Number.isFinite(lng) &&
+      lat >= -90 &&
+      lat <= 90 &&
+      lng >= -180 &&
+      lng <= 180 &&
+      !(lat === 0 && lng === 0);
+
+    if (!hasValidCoordinates) missingCoordsCount += 1;
+
     stops.push({
       stop_id: stopId,
       stop_name: stopName,
       short_name: stopName.split('(')[0].trim().slice(0, 28),
-      lat: Number.isFinite(lat) ? lat : 28.6289,
-      lng: Number.isFinite(lng) ? lng : 77.2195,
+      lat: hasValidCoordinates ? lat : 0,
+      lng: hasValidCoordinates ? lng : 0,
       zone: row['zone_id']?.trim() || 'GTFS Stop',
-      is_major_hub: stopName.toLowerCase().includes('isbt') || stopName.toLowerCase().includes('terminal'),
+      is_major_hub:
+        stopName.toLowerCase().includes('isbt') || stopName.toLowerCase().includes('terminal'),
+      hasValidCoordinates,
     });
   });
+
+  if (missingCoordsCount > 0) {
+    warnings.push(
+      `${missingCoordsCount} GTFS stop(s) had missing/invalid coordinates in stops.txt (excluded from walking links and map markers without inventing positions).`
+    );
+  }
 
   // 2. Parse routes.txt
   const routeRows = normalizedFiles['routes.txt'] ? parseCsvTable(normalizedFiles['routes.txt']) : [];
@@ -157,26 +226,27 @@ export function processGTFSFileContents(
   const tripRows = normalizedFiles['trips.txt'] ? parseCsvTable(normalizedFiles['trips.txt']) : [];
   const tripToRouteDir = new Map<
     string,
-    { routeId: string; direction: 'UP' | 'DOWN'; headsign: string }
+    { routeId: string; serviceId: string; direction: 'UP' | 'DOWN'; headsign: string }
   >();
 
   tripRows.forEach((row) => {
     const tripId = row['trip_id']?.trim();
     const routeId = row['route_id']?.trim();
     if (!tripId || !routeId) return;
+    const serviceId = row['service_id']?.trim() || 'DEFAULT';
     const dirRaw = row['direction_id']?.trim();
     const direction: 'UP' | 'DOWN' = dirRaw === '1' ? 'DOWN' : 'UP';
     const headsign = row['trip_headsign']?.trim() || `${direction} Direction`;
-    tripToRouteDir.set(tripId, { routeId, direction, headsign });
+    tripToRouteDir.set(tripId, { routeId, serviceId, direction, headsign });
   });
 
-  // 4. Parse stop_times.txt and reconstruct canonical stop sequence per (route_id, direction)
+  // 4. Parse stop_times.txt and reconstruct both canonical routes and scheduled trips
   const stopTimeRows = normalizedFiles['stop_times.txt']
     ? parseCsvTable(normalizedFiles['stop_times.txt'])
     : [];
   const tripStopTimes = new Map<
     string,
-    { stopId: string; seq: number; mins: number | null }[]
+    { stopId: string; seq: number; arrMins: number | null; depMins: number | null }[]
   >();
 
   stopTimeRows.forEach((row) => {
@@ -186,16 +256,19 @@ export function processGTFSFileContents(
     if (!tripId || !stopId || !Number.isFinite(seq)) return;
 
     const arrMins = parseGtfsTimeToMinutes(row['arrival_time'] || row['departure_time'] || '');
+    const depMins = parseGtfsTimeToMinutes(row['departure_time'] || row['arrival_time'] || '');
     const list = tripStopTimes.get(tripId) ?? [];
-    list.push({ stopId, seq, mins: arrMins });
+    list.push({ stopId, seq, arrMins, depMins });
     tripStopTimes.set(tripId, list);
   });
 
-  // Pick longest representative trip per (routeId, direction)
   const canonicalTripByRouteDir = new Map<
     string,
     { tripId: string; routeId: string; direction: 'UP' | 'DOWN'; headsign: string; count: number }
   >();
+
+  const scheduledTrips: GTFSScheduledTrip[] = [];
+  const MAX_SCHEDULED_TRIPS = 8000;
 
   tripStopTimes.forEach((stList, tripId) => {
     const tripMeta = tripToRouteDir.get(tripId);
@@ -211,6 +284,50 @@ export function processGTFSFileContents(
         count: stList.length,
       });
     }
+
+    // Build full scheduled trip if stop times contain valid schedule minutes
+    if (scheduledTrips.length < MAX_SCHEDULED_TRIPS) {
+      const sorted = [...stList]
+        .filter((s) => stopIdsSet.has(s.stopId))
+        .sort((a, b) => a.seq - b.seq);
+      if (sorted.length >= 2) {
+        const meta = routeMetaMap.get(tripMeta.routeId) ?? {
+          routeNumber: tripMeta.routeId,
+          routeName: `Route ${tripMeta.routeId}`,
+          isAc: false,
+        };
+        const hasTimes = sorted.every((s) => s.arrMins !== null || s.depMins !== null);
+        if (hasTimes) {
+          let lastTime = 0;
+          const stopTimes: GTFSScheduledStopTime[] = sorted.map((s, idx) => {
+            const rawArr = s.arrMins ?? s.depMins ?? lastTime;
+            const arr = Math.max(lastTime, rawArr);
+            const rawDep = s.depMins ?? arr;
+            const dep = Math.max(arr, rawDep);
+            lastTime = dep;
+            return {
+              stop_id: s.stopId,
+              stop_sequence: idx + 1,
+              arrival_mins: arr,
+              departure_mins: dep,
+            };
+          });
+
+          scheduledTrips.push({
+            trip_id: tripId,
+            route_id: `${tripMeta.routeId}_${tripMeta.direction}`,
+            route_number: meta.routeNumber,
+            route_name: meta.routeName,
+            direction: tripMeta.direction,
+            direction_label: tripMeta.headsign,
+            service_id: tripMeta.serviceId,
+            is_ac: meta.isAc,
+            default_capacity: meta.isAc ? 45 : 50,
+            stop_times: stopTimes,
+          });
+        }
+      }
+    }
   });
 
   const routes: BusRoute[] = [];
@@ -223,10 +340,10 @@ export function processGTFSFileContents(
     const rawStops = [...(tripStopTimes.get(info.tripId) ?? [])].sort((a, b) => a.seq - b.seq);
     if (rawStops.length < 2) return;
 
-    const firstValidMin = rawStops.find((s) => s.mins !== null)?.mins ?? 0;
+    const firstValidMin = rawStops.find((s) => s.arrMins !== null)?.arrMins ?? 0;
     const formattedStops = rawStops.map((s, idx) => {
       const offset =
-        s.mins !== null ? Math.max(0, s.mins - firstValidMin) : idx * 6;
+        s.arrMins !== null ? Math.max(0, s.arrMins - firstValidMin) : idx * 6;
       return {
         stop_id: s.stopId,
         stop_sequence: idx + 1,
@@ -256,11 +373,49 @@ export function processGTFSFileContents(
     ? parseCsvTable(normalizedFiles['calendar_dates.txt'])
     : [];
 
+  const serviceCalendars: GTFSServiceCalendarsMap = {
+    calendars: {},
+    addedDates: {},
+    removedDates: {},
+  };
+
   let weekdayServices = 0;
   let weekendServices = 0;
   calendarRows.forEach((r) => {
-    if (r['monday'] === '1' || r['tuesday'] === '1' || r['wednesday'] === '1') weekdayServices += 1;
-    if (r['saturday'] === '1' || r['sunday'] === '1') weekendServices += 1;
+    const serviceId = r['service_id']?.trim();
+    if (!serviceId) return;
+    const mon = r['monday'] === '1';
+    const tue = r['tuesday'] === '1';
+    const wed = r['wednesday'] === '1';
+    const thu = r['thursday'] === '1';
+    const fri = r['friday'] === '1';
+    const sat = r['saturday'] === '1';
+    const sun = r['sunday'] === '1';
+
+    if (mon || tue || wed || thu || fri) weekdayServices += 1;
+    if (sat || sun) weekendServices += 1;
+
+    const cal: GTFSServiceCalendar = {
+      service_id: serviceId,
+      days: [sun, mon, tue, wed, thu, fri, sat],
+      start_date: normalizeGtfsDate(r['start_date'] ?? ''),
+      end_date: normalizeGtfsDate(r['end_date'] ?? ''),
+    };
+    serviceCalendars.calendars[serviceId] = cal;
+  });
+
+  calDatesRows.forEach((r) => {
+    const serviceId = r['service_id']?.trim();
+    const dateKey = normalizeGtfsDate(r['date'] ?? '');
+    const exType = r['exception_type']?.trim();
+    if (!serviceId || !dateKey) return;
+    if (exType === '1') {
+      serviceCalendars.addedDates[dateKey] = serviceCalendars.addedDates[dateKey] ?? [];
+      serviceCalendars.addedDates[dateKey].push(serviceId);
+    } else if (exType === '2') {
+      serviceCalendars.removedDates[dateKey] = serviceCalendars.removedDates[dateKey] ?? [];
+      serviceCalendars.removedDates[dateKey].push(serviceId);
+    }
   });
 
   return {
@@ -275,6 +430,8 @@ export function processGTFSFileContents(
     },
     stops,
     routes,
+    scheduledTrips,
+    serviceCalendars,
     serviceDaysSummary: {
       weekdayServices,
       weekendServices,

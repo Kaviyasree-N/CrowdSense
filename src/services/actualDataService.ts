@@ -174,6 +174,53 @@ export const actualDataService = {
     return { actualDataset: payload.actualDataset };
   },
 
+  async fetchPaginatedSegments(params: {
+    page: number;
+    limit: number;
+    routeNumber: string;
+    dayType: string;
+    timePeriod: string;
+    direction: string;
+    crowdingLevel: string;
+    acCapacity: number;
+    nonAcCapacity: number;
+  }): Promise<{
+    available: boolean;
+    items: import('../utils/analyticsEngine').BusiestSegmentRow[];
+    total: number;
+    page: number;
+    pageSize: number;
+    totalPages: number;
+  } | null> {
+    try {
+      const qs = new URLSearchParams({
+        page: String(params.page),
+        limit: String(params.limit),
+        routeNumber: params.routeNumber,
+        dayType: params.dayType,
+        timePeriod: params.timePeriod,
+        direction: params.direction,
+        crowdingLevel: params.crowdingLevel,
+        acCapacity: String(params.acCapacity),
+        nonAcCapacity: String(params.nonAcCapacity),
+      });
+      const res = await fetch(`/api/v1/analytics/segments?${qs.toString()}`);
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (!data.ok || !data.available) return null;
+      return {
+        available: true,
+        items: data.items ?? [],
+        total: data.total ?? 0,
+        page: data.page ?? 1,
+        pageSize: data.pageSize ?? params.limit,
+        totalPages: data.totalPages ?? 1,
+      };
+    } catch {
+      return null;
+    }
+  },
+
   async resetServerDataset(): Promise<void> {
     try {
       await fetch('/api/v1/dataset/reset', { method: 'POST' });

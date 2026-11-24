@@ -162,7 +162,8 @@ export const crowdingService = {
     dayOfWeek = dayType === 'weekend' ? 6 : 3,
     preferredModel: PredictionModelType = 'baseline-median',
     dataMode: DataMode = 'demo',
-    customStopLookup?: Record<string, BusStop>
+    customStopLookup?: Record<string, BusStop>,
+    isScheduledTime = false
   ): JourneySegmentEstimate {
     const stopLookup =
       dataMode === 'actual'
@@ -172,19 +173,21 @@ export const crowdingService = {
       stop_id: fromStopId,
       stop_name: fromStopId,
       short_name: fromStopId,
-      lat: 28.6289,
-      lng: 77.2195,
+      lat: 0,
+      lng: 0,
       zone: 'GTFS Stop',
       is_major_hub: false,
+      hasValidCoordinates: false,
     };
     const toStop: BusStop = stopLookup[toStopId] ?? {
       stop_id: toStopId,
       stop_name: toStopId,
       short_name: toStopId,
-      lat: 28.6289,
-      lng: 77.2195,
+      lat: 0,
+      lng: 0,
       zone: 'GTFS Stop',
       is_major_hub: false,
+      hasValidCoordinates: false,
     };
 
     const hour = Number(departureTime.split(':')[0]) || 18;
@@ -229,9 +232,15 @@ export const crowdingService = {
       crowding_level: prediction.crowdingLevel,
       confidence: prediction.confidence,
       confidence_reason: prediction.confidenceReason,
-      boardings_expected: obs?.boardings_avg ?? Math.round(prediction.predictedLoad * 0.28),
-      alightings_expected: obs?.alightings_avg ?? Math.round(prediction.predictedLoad * 0.24),
+      boardings_expected: prediction.hasHistoricalData
+        ? obs?.boardings_avg ?? Math.round(prediction.predictedLoad * 0.28)
+        : 0,
+      alightings_expected: prediction.hasHistoricalData
+        ? obs?.alightings_avg ?? Math.round(prediction.predictedLoad * 0.24)
+        : 0,
       observations_count: prediction.observationsCount,
+      has_historical_data: prediction.hasHistoricalData,
+      is_scheduled_time: isScheduledTime,
       prediction_explanation: prediction.explanation,
     };
   },

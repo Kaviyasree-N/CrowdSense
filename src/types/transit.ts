@@ -20,12 +20,51 @@ export interface BusStop {
   lng: number;
   zone: string;
   is_major_hub: boolean;
+  hasValidCoordinates?: boolean;
 }
 
 export interface RouteStopSequence {
   stop_id: string;
   stop_sequence: number;
   minutes_from_start: number;
+}
+
+export interface GTFSScheduledStopTime {
+  stop_id: string;
+  stop_sequence: number;
+  arrival_mins: number;
+  departure_mins: number;
+}
+
+export interface GTFSScheduledTrip {
+  trip_id: string;
+  route_id: string;
+  route_number: string;
+  route_name: string;
+  direction: 'UP' | 'DOWN';
+  direction_label: string;
+  service_id: string;
+  is_ac: boolean;
+  default_capacity: number;
+  stop_times: GTFSScheduledStopTime[];
+}
+
+export interface GTFSServiceCalendar {
+  service_id: string;
+  days: [boolean, boolean, boolean, boolean, boolean, boolean, boolean]; // Sun (0) .. Sat (6)
+  start_date: string; // YYYYMMDD
+  end_date: string; // YYYYMMDD
+}
+
+export interface GTFSServiceCalendarsMap {
+  calendars: Record<string, GTFSServiceCalendar>;
+  addedDates: Record<string, string[]>; // YYYYMMDD -> service_id[]
+  removedDates: Record<string, string[]>; // YYYYMMDD -> service_id[]
+}
+
+export interface BalancedWeightsConfig {
+  timeWeight: number;
+  crowdingWeight: number;
 }
 
 export interface BusRoute {
@@ -159,17 +198,34 @@ export interface JourneySegmentEstimate {
   boardings_expected: number;
   alightings_expected: number;
   observations_count: number;
+  has_historical_data?: boolean;
+  is_scheduled_time?: boolean;
   prediction_explanation?: PredictionExplanation;
+}
+
+export interface JourneyTransferDetail {
+  after_leg_index: number;
+  from_stop: BusStop;
+  to_stop: BusStop;
+  arrival_time: string;
+  next_departure_time: string;
+  next_route_number: string;
+  wait_mins: number;
+  is_walking_transfer?: boolean;
+  walk_meters?: number;
+  walk_mins?: number;
 }
 
 export interface JourneyLeg {
   leg_index: number;
+  trip_id?: string;
   route_id: string;
   route_number: string;
   route_name: string;
   direction: 'UP' | 'DOWN';
   direction_label: string;
   is_ac: boolean;
+  is_scheduled?: boolean;
   boarding_stop: BusStop;
   alighting_stop: BusStop;
   departure_time: string;
@@ -184,6 +240,7 @@ export interface JourneyLeg {
     cumulative_load: number;
     occupancy_pct: number;
     crowding_level: CrowdingLevel;
+    has_historical_data?: boolean;
   }[];
 }
 
@@ -197,12 +254,17 @@ export interface JourneyOption {
   transfers: number;
   transfer_wait_mins: number;
   transfer_stop?: BusStop;
+  transfers_detail?: JourneyTransferDetail[];
   legs: JourneyLeg[];
   all_segments: JourneySegmentEstimate[];
   peak_segment_occupancy_pct: number;
   peak_crowding_level: CrowdingLevel;
   weighted_avg_occupancy_pct: number;
   overall_confidence: ConfidenceLevel;
+  has_missing_predictions?: boolean;
+  missing_prediction_segments_count?: number;
+  low_confidence_warning?: string;
+  uses_gtfs_schedule?: boolean;
   recommendation_tags: RecommendationCategory[];
   recommendation_reason: string;
   fastest_score: number;
@@ -217,6 +279,28 @@ export interface SearchQuery {
   date: string; // YYYY-MM-DD
   time: string; // HH:mm
   capacityOverride?: number;
+  preferredCategory?: RecommendationCategory;
+}
+
+export type JourneySearchErrorCode =
+  | 'MISSING_GTFS'
+  | 'INVALID_TIME'
+  | 'INVALID_DATE'
+  | 'INVALID_STOPS'
+  | 'SAME_STOP'
+  | 'NO_SERVICE_ON_DATE'
+  | 'NO_ROUTE_FOUND';
+
+export interface JourneySearchResult {
+  journeys: JourneyOption[];
+  errorCode?: JourneySearchErrorCode;
+  errorMessage?: string;
+  graphStats?: {
+    stopsCount: number;
+    activeTripsCount: number;
+    directedEdgesCount: number;
+    walkingLinksCount: number;
+  };
 }
 
 export interface DataQualityReport {
@@ -295,12 +379,89 @@ export interface ProcessedGTFSData {
   summary: GTFSUploadSummary;
   stops: BusStop[];
   routes: BusRoute[];
+  scheduledTrips?: GTFSScheduledTrip[];
+  serviceCalendars?: GTFSServiceCalendarsMap;
   serviceDaysSummary: {
     weekdayServices: number;
     weekendServices: number;
     calendarExceptions: number;
   };
   warnings: string[];
+}
+
+export interface WeeklyDemandPoint {
+  weekNumber: number;
+  weekLabel: string;
+  dateRange: string;
+  tickets: number;
+  passengers: number;
+  weekdayPassengers: number;
+  weekendPassengers: number;
+  daysObserved: number;
+  avgDailyPassengers: number;
+}
+
+export interface HourlyDayTypePoint {
+  hour: string;
+  hourNum: number;
+  weekdayTickets: number;
+  weekdayPassengers: number;
+  weekendTickets: number;
+  weekendPassengers: number;
+}
+
+export interface CriticalHotspotRow {
+  routeId: string;
+  routeNumber: string;
+  direction: 'UP' | 'DOWN';
+  fromStop: string;
+  toStop: string;
+  peakHour: number;
+  timePeriod: string;
+  estimatedLoad: number;
+  assumedCapacity: number;
+  occupancyPct: number;
+  crowdingLevel: CrowdingLevel;
+  observationsCount: number;
+  weeklyConsistencyPct: number;
+  isRecurring: boolean;
+  confidence: ConfidenceLevel;
+}
+
+export interface TransportPlanningInsight {
+  id: string;
+  category:
+    | 'evening-demand'
+    | 'peak-hotspot'
+    | 'weekday-weekend'
+    | 'low-demand'
+    | 'insufficient-data';
+  title: string;
+  detail: string;
+  metricLabel: string;
+}
+
+export interface DataReliabilitySummary {
+  dataMode: DataMode;
+  datasetCoverageLabel: string;
+  dateRangeLabel: string;
+  totalRecords: number;
+  validRecords: number;
+  invalidAndDuplicateCount: number;
+  stopMatchingPct: number;
+  matchedStopsCount: number;
+  totalUniqueStopsCount: number;
+  unmatchedStopsCount: number;
+  unmatchedStopsSample: string[];
+  identifiedTrips: number;
+  ambiguousTrips: number;
+  predictionCoveragePct: number;
+  segmentsWithPredictions: number;
+  totalSegmentsCataloged: number;
+  lowConfidencePredictionsCount: number;
+  lowConfidenceSharePct: number;
+  recordedDemandNote: string;
+  estimatedOccupancyNote: string;
 }
 
 export interface ActualDatasetResult {
@@ -329,7 +490,9 @@ export interface ActualDatasetResult {
   requiredColumnsPresent: string[];
   missingRequiredColumns: string[];
   hourlyDistribution: { hour: string; hourNum: number; tickets: number; passengers: number }[];
+  hourlyDayTypeDistribution?: HourlyDayTypePoint[];
   dailyDistribution: { date: string; dayLabel: string; dayType: DayType; tickets: number; passengers: number }[];
+  weeklyDistribution?: WeeklyDemandPoint[];
   routeVolume: { route: string; routeNumber: string; tickets: number; passengers: number; vehicles: number }[];
   weekdayVsWeekend: {
     weekdayTickets: number;
@@ -338,6 +501,8 @@ export interface ActualDatasetResult {
     weekendPassengers: number;
   };
   timePeriodDemand: { period: string; tickets: number; passengers: number }[];
+  matchedRoutesCount?: number;
+  totalIdentifiedSegments?: number;
   stopMatchingReport: StopMatchingReport;
   pipelineLogs: PipelineStageLog[];
   reconstructedTripsCount: number;
@@ -350,4 +515,5 @@ export interface ActualDatasetResult {
   activeStops: BusStop[];
   truncatedForBrowser: boolean;
 }
+
 

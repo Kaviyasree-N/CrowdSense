@@ -11,9 +11,16 @@ import { promisify } from 'node:util';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import JSZip from 'jszip';
-import type { ActualDatasetResult, ProcessedGTFSData } from './src/types/transit.ts';
+import type { ActualDatasetResult, CrowdingLevel, DayType, ProcessedGTFSData } from './src/types/transit.ts';
 import { processGTFSFileContents, splitCsvLine } from './src/engine/gtfsProcessor.ts';
 import { createEtmStreamProcessor } from './src/engine/etmPipeline.ts';
+import {
+  computeCriticalHotspots,
+  filterSegmentObservations,
+  paginateSegmentObservations,
+} from './src/utils/analyticsEngine.ts';
+import type { AnalyticsFilterState } from './src/utils/analyticsEngine.ts';
+import { DEFAULT_CAPACITY_CONFIG } from './src/utils/crowdClassification.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -186,6 +193,133 @@ async function createApp() {
     serverState.activeEtmFilePath = null;
     serverState.activeEtmSourceName = null;
     res.json({ ok: true });
+  });
+
+  // Pre-aggregated paginated segment crowding endpoint for large datasets
+  app.get('/api/v1/analytics/segments', (req: Request, res: Response) => {
+    const actual = serverState.actualDataset;
+    const page = Math.max(1, Number(req.query.page ?? 1) || 1);
+    const pageSize = Math.max(1, Math.min(100, Number(req.query.limit ?? 15) || 15));
+
+    if (!actual) {
+      res.json({
+        ok: true,
+        available: false,
+        items: [],
+        total: 0,
+        page: 1,
+        pageSize,
+        totalPages: 1,
+      });
+      return;
+    }
+
+    const acCap = Math.max(10, Math.min(150, Number(req.query.acCapacity ?? DEFAULT_CAPACITY_CONFIG.acCapacity) || DEFAULT_CAPACITY_CONFIG.acCapacity));
+    const nonAcCap = Math.max(10, Math.min(150, Number(req.query.nonAcCapacity ?? DEFAULT_CAPACITY_CONFIG.nonAcCapacity) || DEFAULT_CAPACITY_CONFIG.nonAcCapacity));
+    const capacityConfig = {
+      ...DEFAULT_CAPACITY_CONFIG,
+      acCapacity: acCap,
+      nonAcCapacity: nonAcCap,
+    };
+
+    const routeCapacityLookup = new Map<string, number>();
+    actual.activeRoutes.forEach((r) => {
+      routeCapacityLookup.set(r.route_id, r.is_ac ? acCap : nonAcCap);
+    });
+
+    const dayTypeRaw = String(req.query.dayType ?? 'all');
+    const timeRaw = String(req.query.timePeriod ?? 'all');
+    const dirRaw = String(req.query.direction ?? 'all');
+    const crowdingRaw = String(req.query.crowdingLevel ?? 'ALL');
+
+    const filters: Partial<AnalyticsFilterState> = {
+      routeNumber: String(req.query.routeNumber ?? 'ALL'),
+      dayType: dayTypeRaw === 'weekday' || dayTypeRaw === 'weekend' ? (dayTypeRaw as DayType) : 'all',
+      timePeriod:
+        timeRaw === 'morning' || timeRaw === 'midday' || timeRaw === 'evening' || timeRaw === 'night'
+          ? timeRaw
+          : 'all',
+      direction: dirRaw === 'UP' || dirRaw === 'DOWN' ? dirRaw : 'all',
+    };
+
+    const crowdingFilter: 'ALL' | CrowdingLevel =
+      crowdingRaw === 'Seats Available' ||
+      crowdingRaw === 'Standing Room' ||
+      crowdingRaw === 'Crowded' ||
+      crowdingRaw === 'Very Crowded'
+        ? crowdingRaw
+        : 'ALL';
+
+    const filtered = filterSegmentObservations(actual.aggregatedObservations, filters);
+    const paginated = paginateSegmentObservations(
+      filtered,
+      routeCapacityLookup,
+      capacityConfig,
+      page,
+      pageSize,
+      crowdingFilter
+    );
+
+    res.json({ ok: true, available: true, ...paginated });
+  });
+
+  app.get('/api/v1/analytics/hotspots', (req: Request, res: Response) => {
+    const actual = serverState.actualDataset;
+    const page = Math.max(1, Number(req.query.page ?? 1) || 1);
+    const pageSize = Math.max(1, Math.min(100, Number(req.query.limit ?? 15) || 15));
+
+    if (!actual) {
+      res.json({ ok: true, available: false, items: [], total: 0, page: 1, pageSize, totalPages: 1 });
+      return;
+    }
+
+    const acCap = Math.max(10, Math.min(150, Number(req.query.acCapacity ?? DEFAULT_CAPACITY_CONFIG.acCapacity) || DEFAULT_CAPACITY_CONFIG.acCapacity));
+    const nonAcCap = Math.max(10, Math.min(150, Number(req.query.nonAcCapacity ?? DEFAULT_CAPACITY_CONFIG.nonAcCapacity) || DEFAULT_CAPACITY_CONFIG.nonAcCapacity));
+    const capacityConfig = {
+      ...DEFAULT_CAPACITY_CONFIG,
+      acCapacity: acCap,
+      nonAcCapacity: nonAcCap,
+    };
+
+    const routeCapacityLookup = new Map<string, number>();
+    actual.activeRoutes.forEach((r) => {
+      routeCapacityLookup.set(r.route_id, r.is_ac ? acCap : nonAcCap);
+    });
+
+    const filtered = filterSegmentObservations(actual.aggregatedObservations, {
+      routeNumber: String(req.query.routeNumber ?? 'ALL'),
+      dayType:
+        req.query.dayType === 'weekday' || req.query.dayType === 'weekend'
+          ? (req.query.dayType as DayType)
+          : 'all',
+      timePeriod:
+        req.query.timePeriod === 'morning' ||
+        req.query.timePeriod === 'midday' ||
+        req.query.timePeriod === 'evening' ||
+        req.query.timePeriod === 'night'
+          ? req.query.timePeriod
+          : 'all',
+      direction:
+        req.query.direction === 'UP' || req.query.direction === 'DOWN'
+          ? req.query.direction
+          : 'all',
+    });
+
+    const allHotspots = computeCriticalHotspots(filtered, routeCapacityLookup, capacityConfig);
+    const total = allHotspots.length;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const safePage = Math.max(1, Math.min(totalPages, page));
+    const start = (safePage - 1) * pageSize;
+
+    res.json({
+      ok: true,
+      available: true,
+      items: allHotspots.slice(start, start + pageSize),
+      total,
+      page: safePage,
+      pageSize,
+      totalPages,
+    });
   });
 
   // Static GTFS ingestion (.txt files or .zip archive)
